@@ -3,7 +3,7 @@
 Evidence-driven AP exception investigation and resolution **recommendation** platform, with human-controlled execution.
 Built for the Vultr Agent Rush hackathon (Challenge 2 — Finance & Accounting / Procurement).
 
-**Status:** scaffold only. See [docs/architecture.md](docs/architecture.md) for the frozen v3 spec and [docs/decisions.md](docs/decisions.md) for open decisions.
+**Status:** deployed skeleton + mock-data UI; backend logic in progress. See [docs/architecture.md](docs/architecture.md) for the frozen v3 spec and [docs/decisions.md](docs/decisions.md) for open decisions.
 
 ## Run locally
 
@@ -26,5 +26,5 @@ If the certificate fails, check that ports 80/443 are open in both ufw and the V
 
 - `backend/` — FastAPI app, rule engine, investigation agent
 - `data/` — synthetic AP dataset
-- `frontend/` — UI (AI Studio export)
+- `frontend/` — React UI (AI Studio export). `cd frontend && npm install && npm run build`, then commit `dist/` (served by Caddy; the VM needs no Node)
 - `docs/` — architecture and decisions
