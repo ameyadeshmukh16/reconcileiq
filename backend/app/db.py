@@ -47,7 +47,7 @@ DATA_TABLES = ["vendors", "purchase_orders", "goods_receipts", "invoices"]
 
 
 def connect(path: str | None = None) -> sqlite3.Connection:
-    conn = sqlite3.connect(path or config.DB_PATH)
+    conn = sqlite3.connect(path or config.DB_PATH, check_same_thread=False)
     conn.row_factory = sqlite3.Row
     conn.execute("PRAGMA foreign_keys = ON")
     return conn

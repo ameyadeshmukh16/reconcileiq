@@ -23,3 +23,6 @@ OPENROUTER_MODEL = os.getenv("OPENROUTER_MODEL", "")
 
 BASIC_AUTH_USER = os.getenv("BASIC_AUTH_USER", "")
 BASIC_AUTH_PASSWORD = os.getenv("BASIC_AUTH_PASSWORD", "")
+
+# Seed the first pipeline run and resume pending investigations on startup.
+AUTO_RUN_ON_START = os.getenv("AUTO_RUN_ON_START", "true").lower() == "true"

@@ -57,6 +57,7 @@ class RunSummary(BaseModel):
     total_cases: int
     by_status: dict[str, int] = {}
     by_severity: dict[str, int] = {}
+    in_progress: bool = False   # agent investigation still running for this run's cases
 
 
 class TimelineEvent(BaseModel):
