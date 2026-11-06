@@ -30,12 +30,17 @@ class Case(BaseModel):
     anomaly_type: AnomalyType
     detection_method: Literal["rule_engine", "agent_investigation"]
     investigation_provider: Literal["vultr", "openrouter", "none"] = "none"
+    investigation_model: Optional[str] = None
     evidence: list[Evidence] = []
     finding: str = ""
     confidence: Literal["low", "medium", "high"] = "low"
     recommendation: Recommendation = "escalate"
     requires_human_approval: bool = True
     suggested_action: str = ""
+    # Optional structured finding fields used by the UI
+    recommendation_rationale: Optional[str] = None
+    finding_facts: list[str] = []
+    finding_interpretation: Optional[str] = None
     status: Status = "received"
     flagged_at: str
     resolved_at: Optional[str] = None
@@ -52,3 +57,16 @@ class RunSummary(BaseModel):
     total_cases: int
     by_status: dict[str, int] = {}
     by_severity: dict[str, int] = {}
+
+
+class TimelineEvent(BaseModel):
+    ts: str
+    actor: Literal["rule_engine", "agent", "human"]
+    type: Literal["rule_check", "tool_call", "status_change", "decision"]
+    summary: str
+    detail: Any = None
+
+
+class CaseDetail(BaseModel):
+    case: Case
+    timeline: list[TimelineEvent]

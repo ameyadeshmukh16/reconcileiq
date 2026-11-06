@@ -11,3 +11,14 @@ Gaps found in the v3 architecture doc while setting up the repo. Resolve at the 
 | 5 | Status path for rule-flagged and clean cases unspecified | Rule-flagged → straight to `awaiting_review` (templated action, human still decides); clean cases recorded, not surfaced for review | Rule engine (hr 3.5) |
 | 6 | Vultr tool-calling spike timing: build table says hr 4.5–5, cut-order/risks say 3.5–4 | Treat the build table as authoritative | n/a |
 | 7 | Pipeline re-runs could duplicate cases | Make runs idempotent per invoice | Rule engine / API |
+
+## Resolved during implementation
+
+| # | Resolution |
+|---|---|
+| 5 | Implemented: rule-flagged (exact duplicate only) -> `awaiting_review` with templated action; ambiguous cases -> `received` until the agent runs; clean invoices create no case. A duplicate number with a *different* amount is ambiguous, so it goes to the agent. |
+| 7 | Implemented: unique index `cases.invoice_id`; a re-run skips invoices that already have a case, so it never duplicates or resets a reviewed case. |
+| 8 | `RunSummary` counts are live over all cases (not frozen per run) so decisions show up immediately. |
+| 9 | `Case` gained `investigation_model` (spec says provider *and* model are recorded) plus optional `recommendation_rationale`, `finding_facts`, `finding_interpretation` used by the UI. |
+| 10 | Rule-engine "today" is the fixed `AS_OF_DATE` (2026-11-06) so the synthetic dataset's stale-invoice results are deterministic. |
+

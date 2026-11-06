@@ -4,6 +4,12 @@ import os
 AMOUNT_TOLERANCE_PCT = 2.0        # invoice vs PO amount, percent
 QUANTITY_TOLERANCE_UNITS = 0      # billed vs received, units
 STALE_INVOICE_DAYS = 90           # invoice older than this is stale
+VENDOR_NEAR_MATCH_RATIO = 0.85    # name similarity at/above this = near-match (possible typo)
+HIGH_SEVERITY_PCT = 5.0           # amount/quantity variance above this is high severity
+
+# Fixed "today" for the synthetic dataset so rule results are deterministic.
+# Set AS_OF_DATE="" in the environment to use the real current date instead.
+AS_OF_DATE = os.getenv("AS_OF_DATE", "2026-11-06")
 
 # --- Environment settings ---
 DB_PATH = os.getenv("DB_PATH", "reconcileiq.db")
