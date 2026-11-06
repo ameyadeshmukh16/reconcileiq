@@ -1,0 +1,15 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>ReconcileIQ</title>
+</head>
+<body>
+  <h1>ReconcileIQ</h1>
+  <p>Deployment placeholder. API health: <span id="h">checking…</span></p>
+  <script>
+    fetch('/api/health').then(r => r.json()).then(j => h.textContent = j.status).catch(() => h.textContent = 'unreachable');
+  </script>
+</body>
+</html>
