@@ -1,0 +1,151 @@
+"""Agent tests with a scripted fake LLM: guardrails and provider-fallback rules, no network."""
+import json
+from types import SimpleNamespace
+
+import httpx
+import pytest
+from openai import APIConnectionError, AuthenticationError, InternalServerError
+
+from app import cases, pipeline
+from app.agent import investigator, llm
+
+
+@pytest.fixture()
+def conn(tmp_path):
+    c = pipeline.bootstrap(str(tmp_path / "a.db"))
+    pipeline.run_pipeline(c)
+    yield c
+    c.close()
+
+
+def call(name, **args):
+    return SimpleNamespace(id=f"c_{name}", function=SimpleNamespace(name=name, arguments=json.dumps(args)))
+
+
+def msg(*calls):
+    return SimpleNamespace(content=None, tool_calls=list(calls))
+
+
+def script(monkeypatch, replies, provider="vultr", model="fake-model"):
+    it = iter(replies)
+    monkeypatch.setattr(llm, "chat", lambda messages, tools, order=(): (next(it), provider, model))
+
+
+def finding(**over):
+    base = dict(recommendation="approve", confidence="high", recommendation_rationale="r",
+                verified_facts=["Invoice amount is 21600.00"], interpretation="i", suggested_action="a",
+                evidence_refs=[{"source": "invoice", "field": "amount"}])
+    base.update(over)
+    return call("submit_finding", **base)
+
+
+def case_for(conn, number):
+    return next(c for c in cases.list_cases(conn) if c.invoice_number == number)
+
+
+def test_missing_evidence_forces_escalate_low(conn, monkeypatch):
+    c = case_for(conn, "INV-33981")
+    script(monkeypatch, [msg(call("get_invoice", invoice_number="INV-33981")),
+                         msg(call("get_goods_receipt", po_number="PO-77519")),
+                         msg(finding(recommendation="approve", confidence="high"))])
+    out = investigator.investigate(conn, c.case_id)
+    assert (out.recommendation, out.confidence) == ("escalate", "low")
+    assert out.status == "awaiting_review" and out.requires_human_approval is True
+    guard = cases.get_timeline(conn, c.case_id)[-1].detail["guardrail_adjustments"]
+    assert any("missing evidence" in g for g in guard)
+
+
+def test_contradictory_evidence_forces_escalate_low(conn, monkeypatch):
+    c = case_for(conn, "INV-55102")
+    script(monkeypatch, [msg(call("get_invoice", invoice_number="INV-55102")),
+                         msg(finding(recommendation="request_vendor_clarification", confidence="medium"))])
+    out = investigator.investigate(conn, c.case_id)
+    assert (out.recommendation, out.confidence) == ("escalate", "low")
+
+
+def test_vendor_mismatch_never_rejected(conn, monkeypatch):
+    c = case_for(conn, "INV-61208")
+    script(monkeypatch, [msg(call("get_invoice", invoice_number="INV-61208")),
+                         msg(finding(recommendation="reject"))])
+    assert investigator.investigate(conn, c.case_id).recommendation == "request_vendor_clarification"
+
+
+def test_invented_evidence_is_dropped_and_logged(conn, monkeypatch):
+    c = case_for(conn, "INV-88204")
+    script(monkeypatch, [msg(call("get_invoice", invoice_number="INV-88204")),
+                         msg(finding(evidence_refs=[{"source": "invoice", "field": "amount"},
+                                                    {"source": "goods_receipt", "field": "made_up_field"}]))])
+    out = investigator.investigate(conn, c.case_id)
+    assert [(e.field, e.value) for e in out.evidence] == [("amount", 10450.0)]   # value comes from the record
+    assert cases.get_timeline(conn, c.case_id)[-1].detail["dropped_evidence_refs"] == ["goods_receipt.made_up_field"]
+
+
+def test_tool_calls_are_audited_with_real_results(conn, monkeypatch):
+    c = case_for(conn, "INV-88204")
+    script(monkeypatch, [msg(call("get_po", po_number="PO-77194")), msg(finding())])
+    investigator.investigate(conn, c.case_id)
+    ev = next(e for e in cases.get_timeline(conn, c.case_id) if e.type == "tool_call")
+    assert ev.detail["result"]["amount"] == 10000 and ev.detail["provider"] == "vultr"
+
+
+def test_no_valid_finding_escalates_instead_of_guessing(conn, monkeypatch):
+    c = case_for(conn, "INV-88204")
+    plain = SimpleNamespace(content="I think it is fine", tool_calls=None)
+    script(monkeypatch, [plain, plain])
+    out = investigator.investigate(conn, c.case_id)
+    assert (out.status, out.recommendation, out.confidence) == ("awaiting_review", "escalate", "low")
+
+
+def test_rule_flagged_case_not_investigable(conn):
+    dup = next(c for c in cases.list_cases(conn) if c.detection_method == "rule_engine")
+    with pytest.raises(cases.TransitionError):
+        investigator.investigate(conn, dup.case_id)
+
+
+# ---------- provider fallback policy ----------
+
+def _prov(monkeypatch, behaviours):
+    class FakeClient:
+        def __init__(self, name):
+            self.chat = SimpleNamespace(completions=SimpleNamespace(create=lambda **kw: behaviours[name]()))
+    ps = {n: llm.Provider(n, "http://x", "k", f"{n}-model") for n in ("vultr", "openrouter")}
+    for p in ps.values():
+        monkeypatch.setattr(p, "client", (lambda n=p.name: FakeClient(n)), raising=False)
+    monkeypatch.setattr(llm, "providers", lambda: ps)
+
+
+def _ok(text):
+    return lambda: SimpleNamespace(choices=[SimpleNamespace(message=SimpleNamespace(content=text, tool_calls=None))])
+
+
+REQ = httpx.Request("POST", "http://x")
+
+
+def test_transient_error_falls_back(monkeypatch):
+    def boom():
+        raise APIConnectionError(request=REQ)
+    _prov(monkeypatch, {"vultr": boom, "openrouter": _ok("hi")})
+    m, provider, model = llm.chat([], [])
+    assert (provider, model, m.content) == ("openrouter", "openrouter-model", "hi")
+
+
+def test_5xx_falls_back(monkeypatch):
+    def boom():
+        raise InternalServerError("x", response=httpx.Response(503, request=REQ), body=None)
+    _prov(monkeypatch, {"vultr": boom, "openrouter": _ok("hi")})
+    assert llm.chat([], [])[1] == "openrouter"
+
+
+def test_auth_error_fails_loudly_without_fallback(monkeypatch):
+    def bad_key():
+        raise AuthenticationError("bad key", response=httpx.Response(401, request=REQ), body=None)
+    _prov(monkeypatch, {"vultr": bad_key, "openrouter": _ok("should not be used")})
+    with pytest.raises(AuthenticationError):
+        llm.chat([], [])
+
+
+def test_unconfigured_primary_fails_loudly(monkeypatch):
+    ps = {"vultr": llm.Provider("vultr", "", "", ""), "openrouter": llm.Provider("openrouter", "u", "k", "m")}
+    monkeypatch.setattr(llm, "providers", lambda: ps)
+    with pytest.raises(llm.ConfigError):
+        llm.chat([], [])
