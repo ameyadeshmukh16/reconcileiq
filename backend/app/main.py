@@ -139,17 +139,18 @@ def get_case(case_id: str, conn=Depends(get_conn)):
 
 
 class Decision(BaseModel):
+    # `actor` is the reviewer's SELF-DECLARED name. The recorded identity is the authenticated username.
     decision: Literal["approved", "dismissed"]
     reason: str
     actor: str
 
 
 @app.patch("/api/cases/{case_id}", response_model=Case)
-def decide_case(case_id: str, body: Decision, conn=Depends(get_conn), _user: str = Depends(require_auth)):
+def decide_case(case_id: str, body: Decision, conn=Depends(get_conn), user: str = Depends(require_auth)):
     if not body.reason.strip() or not body.actor.strip():
         raise HTTPException(422, "reason and actor are required")
     try:
-        return cases.decide(conn, case_id, body.decision, body.actor, body.reason)
+        return cases.decide(conn, case_id, body.decision, user, body.reason, declared_reviewer=body.actor)
     except cases.NotFoundError:
         raise HTTPException(404, f"Case {case_id} not found")
     except cases.TransitionError as exc:
