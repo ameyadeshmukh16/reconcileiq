@@ -90,7 +90,7 @@ export const RunSummaryStrip: React.FC<RunSummaryStripProps> = ({
                     <span className="w-1.5 h-1.5 rounded-full bg-[#0D5C58]" title="Active filter" />
                   )}
                 </div>
-                <span className="text-xs font-semibold text-[#0D5C58] block truncate leading-none">
+                <span className="text-xs font-semibold text-[#0D5C58] block truncate leading-snug pb-0.5">
                   {tile.label}
                 </span>
               </button>
@@ -117,7 +117,7 @@ export const RunSummaryStrip: React.FC<RunSummaryStripProps> = ({
                   <span className="w-1.5 h-1.5 rounded-full bg-gray-600" title="Active filter" />
                 )}
               </div>
-              <span className="text-xs text-gray-500 block truncate leading-none font-medium">
+              <span className="text-xs text-gray-500 block truncate leading-snug pb-0.5 font-medium">
                 {tile.label}
               </span>
             </button>

@@ -19,7 +19,7 @@ export { INITIAL_RUN_ID, INITIAL_RUN_SUMMARY };
 // Tech constraint: A single api.ts module with a USE_MOCKS constant (default true).
 // When true, return the mock data with a ~300ms delay. When false, call the real endpoints.
 // The component code must not change when flipping the flag.
-export const USE_MOCKS = true;
+export const USE_MOCKS = false;
 
 // Toast callback for 401 authentication required notification
 type AuthToastCallback = (message: string) => void;
@@ -105,20 +105,43 @@ export function resetMockData() {
 // Helper for ~300ms simulated network latency
 const delay = (ms = 300) => new Promise((resolve) => setTimeout(resolve, ms));
 
-// Custom fetch wrapper with HTTP 401 Basic Auth handling and single retry
+// Writes: the browser shows its native Basic Auth dialog on a 401 challenge and retries by itself.
+// If we still see 401 the user cancelled the dialog (or entered wrong credentials).
 async function fetchWithAuthRetry(
   url: string,
   options: RequestInit = {}
 ): Promise<Response> {
-  let response = await fetch(url, options);
-
+  const response = await fetch(url, options);
   if (response.status === 401) {
     notifyAuthRequired();
-    // Retry once (native browser auth may supply credentials on second try)
-    response = await fetch(url, options);
+    throw new Error("Authentication required: enter the reviewer credentials to continue");
   }
-
+  if (response.status === 503) {
+    throw new Error("Write actions are disabled: server credentials are not configured");
+  }
   return response;
+}
+
+async function errorMessage(res: Response, fallback: string): Promise<string> {
+  try {
+    const body = await res.json();
+    if (typeof body?.detail === "string") return body.detail;
+  } catch { /* ignore */ }
+  return `${fallback}: ${res.statusText || res.status}`;
+}
+
+/**
+ * GET /api/runs/latest -> RunSummary, or null if nothing has been run yet (404)
+ */
+export async function getLatestRun(): Promise<RunSummary | null> {
+  if (USE_MOCKS) {
+    await delay(250);
+    return loadMockRunSummary();
+  }
+  const res = await fetch("/api/runs/latest");
+  if (res.status === 404) return null;
+  if (!res.ok) throw new Error(`Failed to fetch latest run: ${res.statusText || res.status}`);
+  return res.json();
 }
 
 /**
@@ -159,7 +182,7 @@ export async function startReconciliationRun(): Promise<RunSummary> {
   });
 
   if (!res.ok) {
-    throw new Error(`Failed to start run: ${res.statusText}`);
+    throw new Error(await errorMessage(res, "Failed to start run"));
   }
   return res.json();
 }
@@ -336,7 +359,7 @@ export async function resolveCase(
   });
 
   if (!res.ok) {
-    throw new Error(`Failed to resolve case: ${res.statusText}`);
+    throw new Error(await errorMessage(res, "Failed to resolve case"));
   }
   return res.json();
 }

@@ -67,6 +67,7 @@ export interface RunSummary {
   total_cases: number;
   by_status: Record<string, number>;
   by_severity: Record<string, number>;
+  in_progress?: boolean;
 }
 
 export interface TimelineEvent {

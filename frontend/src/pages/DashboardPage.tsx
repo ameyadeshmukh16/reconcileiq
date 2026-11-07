@@ -1,6 +1,6 @@
 import React, { useState, useEffect, useCallback } from "react";
 import { Case, RunSummary } from "../types";
-import { getCases, getRunSummary, INITIAL_RUN_ID } from "../api";
+import { getCases, getLatestRun } from "../api";
 import { RunSummaryStrip, StatTileFilter } from "../components/RunSummaryStrip";
 import { CaseTable } from "../components/CaseTable";
 import { AlertTriangle } from "lucide-react";
@@ -39,9 +39,9 @@ export const DashboardPage: React.FC<DashboardPageProps> = ({
 
       if (!latestSummary) {
         setLoadingSummary(true);
-        const summaryData = await getRunSummary(INITIAL_RUN_ID);
+        const summaryData = await getLatestRun();
         setSummary(summaryData);
-        onRunUpdated(summaryData);
+        if (summaryData) onRunUpdated(summaryData);
         setLoadingSummary(false);
       } else {
         setSummary(latestSummary);
@@ -116,6 +116,18 @@ export const DashboardPage: React.FC<DashboardPageProps> = ({
           >
             Retry
           </button>
+        </div>
+      )}
+
+      {!summary && !loadingSummary && !error && (
+        <div className="bg-white border border-[#E5E7EB] rounded-lg p-6 text-sm text-gray-600 text-center">
+          No reconciliation has been run yet. Click <b>Run reconciliation</b> to analyse the invoices.
+        </div>
+      )}
+
+      {summary?.in_progress && (
+        <div className="px-3 py-2 bg-[#E6F4F2] border border-[#B7DAD6] rounded-md text-xs text-[#0D5C58]">
+          The agent is investigating flagged invoices. Cases appear as awaiting review when each investigation finishes.
         </div>
       )}
 

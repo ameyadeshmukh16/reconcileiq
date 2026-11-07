@@ -1,4 +1,4 @@
-import React, { useState } from "react";
+import React, { useState, useEffect, useRef } from "react";
 import { Play, Loader2 } from "lucide-react";
 import { startReconciliationRun } from "../api";
 import { useToast } from "./Toast";
@@ -7,11 +7,19 @@ import { RunSummary } from "../types";
 interface HeaderProps {
   onRunTriggered: (summary: RunSummary) => void;
   currentPath?: string;
+  running?: boolean;
 }
 
-export const Header: React.FC<HeaderProps> = ({ onRunTriggered, currentPath }) => {
+export const Header: React.FC<HeaderProps> = ({ onRunTriggered, currentPath, running = false }) => {
   const [isRunning, setIsRunning] = useState(false);
   const { addToast } = useToast();
+  const wasRunning = useRef(false);
+  useEffect(() => {
+    if (wasRunning.current && !running) {
+      addToast("All flagged invoices investigated; cases are awaiting human review", "success", "Investigation Complete");
+    }
+    wasRunning.current = running;
+  }, [running, addToast]);
 
   const isCasePage = currentPath?.startsWith("#/case/");
 
@@ -23,9 +31,9 @@ export const Header: React.FC<HeaderProps> = ({ onRunTriggered, currentPath }) =
       const summary = await startReconciliationRun();
       setIsRunning(false);
       addToast(
-        `Pipeline completed: ${summary.total_cases} exceptions analyzed (${summary.by_status?.awaiting_review ?? 7} awaiting human approval)`,
-        "success",
-        "Reconciliation Complete"
+        `Rules checked: ${summary.total_cases} cases. ${summary.in_progress ? "Agent investigation running in the background." : "Nothing new to investigate."}`,
+        "info",
+        "Reconciliation Started"
       );
       onRunTriggered(summary);
     } catch (err: any) {
@@ -55,13 +63,13 @@ export const Header: React.FC<HeaderProps> = ({ onRunTriggered, currentPath }) =
         {!isCasePage ? (
           <button
             onClick={handleRunReconciliation}
-            disabled={isRunning}
+            disabled={isRunning || running}
             className="flex items-center gap-2 px-3 py-1.5 text-xs font-semibold text-white bg-[#0D5C58] hover:bg-[#0A4D48] active:bg-[#083D39] disabled:opacity-70 disabled:cursor-not-allowed rounded transition-colors whitespace-nowrap focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[#0D5C58]"
           >
-            {isRunning ? (
+            {isRunning || running ? (
               <>
                 <Loader2 className="w-3.5 h-3.5 animate-spin" />
-                <span>Running...</span>
+                <span>{running ? "Investigating..." : "Running..."}</span>
               </>
             ) : (
               <>

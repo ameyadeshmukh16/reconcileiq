@@ -4,6 +4,7 @@ import { ToastProvider } from "./components/Toast";
 import { DashboardPage } from "./pages/DashboardPage";
 import { CaseDetailPage } from "./pages/CaseDetailPage";
 import { RunSummary } from "./types";
+import { getLatestRun } from "./api";
 
 export default function App() {
   const [currentHash, setCurrentHash] = useState<string>(() => window.location.hash || "#/");
@@ -17,6 +18,19 @@ export default function App() {
     window.addEventListener("hashchange", handleHashChange);
     return () => window.removeEventListener("hashchange", handleHashChange);
   }, []);
+
+  // While the agent is investigating in the background, poll the live run summary.
+  const inProgress = latestSummary?.in_progress ?? false;
+  useEffect(() => {
+    if (!inProgress) return;
+    const timer = setInterval(async () => {
+      try {
+        const s = await getLatestRun();
+        if (s) setLatestSummary(s);
+      } catch { /* transient; try again next tick */ }
+    }, 3000);
+    return () => clearInterval(timer);
+  }, [inProgress]);
 
   // Parse hash route: '#/' or '#/case/<case_id>'
   let pageContent = <DashboardPage latestSummary={latestSummary} onRunUpdated={setLatestSummary} />;
@@ -34,6 +48,7 @@ export default function App() {
         {/* Navigation header */}
         <Header
           currentPath={currentHash}
+          running={inProgress}
           onRunTriggered={(summary) => {
             setLatestSummary(summary);
           }}
