@@ -1,5 +1,7 @@
 # ReconcileIQ — Architecture & Decisions (v3, FROZEN for implementation)
 
+> **Implementation note (2026-11-07):** this spec is the frozen v3 plan. Where the build differs, [decisions.md](decisions.md) ("Resolved during implementation", items 5-17) is authoritative: verified facts are backend-built, the investigation contract and authorization guardrail are enforced in code, `calculate_difference` is an optional helper, a PO-approvals tool was added, and the reviewer buttons mean Accept recommendation / Override and close (stored as `approved` / `dismissed`).
+
 **Hackathon:** Vultr Agent Rush
 **Challenge track:** Challenge 2 — "Powering the Future of Work" (Finance & Accounting / Procurement)
 **Format:** Solo build, **1 day, ~10 hours total**

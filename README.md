@@ -4,7 +4,7 @@
 
 Built for the Vultr Agent Rush hackathon, Challenge 2: Finance & Accounting / Procurement.
 
-**Live demo:** https://agent-solo-vultr.duckdns.org (reads are public; approving, dismissing or re-running asks for the reviewer login)
+**Live demo:** https://agent-solo-vultr.duckdns.org (reads are public; accepting or overriding a recommendation, or re-running, asks for the reviewer login)
 
 ## The problem
 
@@ -13,13 +13,14 @@ Accounts-payable teams match every vendor invoice against a purchase order (PO) 
 ## What ReconcileIQ does
 
 1. **Rule engine** (deterministic, pandas) checks every invoice against its PO and GRN and flags exceptions. Clear-cut cases, such as an exact duplicate, go straight to review with a templated action.
-2. **Investigation agent** (LLM with tool calling) takes the ambiguous cases. It pulls the invoice, PO and goods receipt, checks policy, calculates differences, then submits a structured finding: facts, interpretation, recommendation (`approve`, `request_vendor_clarification`, `escalate`, `reject`) and confidence.
+2. **Investigation agent** (LLM with tool calling) takes the ambiguous cases. It pulls the invoice, PO and goods receipt, checks policy and PO amendments, then submits a structured finding: interpretation, recommendation (`approve`, `request_vendor_clarification`, `escalate`, `reject`) and confidence.
 3. **Audit trail** records every rule check, tool call, status change and decision as an insert-only event (enforced by SQLite triggers).
-4. **Human review dashboard**: a reviewer sees the evidence side by side with the agent's reasoning and approves or dismisses with a recorded reason. **Nothing is executed or paid by the system.**
+4. **Human review dashboard**: a reviewer sees the evidence side by side with the agent's reasoning and accepts the recommendation or overrides it, with a recorded reason. **Nothing is executed or paid by the system.**
 
 ## Guardrails (enforced in code, not just in the prompt)
 
-- Evidence values are filled in from the records the agent actually retrieved. The model only names which fields matter, so it cannot invent numbers. Any number in its prose that is not in the retrieved data is logged as `unverified_numbers`.
+- The "verified facts" shown to reviewers are built by the backend from the retrieved records and its own arithmetic. The model's text is interpretation only and is never displayed as verified. Evidence values are filled from the retrieved records, and any number in the model's prose that is not in them is logged as `unverified_numbers`.
+- `submit_finding` is rejected until the required lookups (invoice, PO, goods receipt, policy, and PO amendments for amount or quantity cases) have run.
 - `requires_human_approval` is always true, and every investigated case ends in `awaiting_review`.
 - Missing evidence, or several independent discrepancies on one invoice (for example amount and quantity both off), forces `escalate` with `low` confidence.
 - `approve` is overridden to `escalate` when the invoice overbills beyond tolerance with no recorded PO amendment that covers it, or bills more units than were received. A receiving note explains a difference; it never authorizes it.
@@ -58,7 +59,7 @@ Browser ──HTTPS──> Caddy (Let's Encrypt, static React UI)
 | `GET /api/runs/latest`, `/api/runs/{id}` | none | run summary with live counts and `in_progress` |
 | `GET /api/cases?status=&severity=&anomaly_type=` | none | list cases |
 | `GET /api/cases/{id}` | none | case with evidence, finding and audit timeline |
-| `PATCH /api/cases/{id}` | Basic | approve or dismiss with reason and actor (409 if already decided) |
+| `PATCH /api/cases/{id}` | Basic | accept (`approved`) or override and close (`dismissed`) with a reason; the recorded identity is the authenticated user, `actor` is a self-declared name (409 if already decided) |
 
 Runs are idempotent: one case per invoice, so re-running never duplicates work.
 
@@ -116,6 +117,7 @@ If the certificate fails, check that ports 80/443 are open in both ufw and the V
 
 - `backend/`: FastAPI app, rule engine, investigation agent, tests
 - `data/`: synthetic AP dataset
+- `backend/app/evaluation/`: labelled evaluation set and harness (`python -m app.evaluation.run`, needs real provider keys)
 - `frontend/`: React UI. `cd frontend && npm install && npm run build`, then commit `dist/` (served by Caddy; the VM needs no Node)
 - `docs/`: architecture ([architecture.md](docs/architecture.md)) and decisions ([decisions.md](docs/decisions.md))
 
@@ -124,4 +126,6 @@ If the certificate fails, check that ports 80/443 are open in both ufw and the V
 - Synthetic data and single-line-item invoices only; no ERP integration.
 - Reads are public by design for the demo; only writes are authenticated, with one shared reviewer login.
 - The fallback model is a free-tier model and may be rate limited.
+- The rule engine does not know about PO amendments; it flags an invoice and the agent resolves it from evidence. The live demo database has no amendments, so the "authorized" path is exercised by the evaluation and tests, not by the live cases.
+- The evaluation is small (20 cases), single-run and partly in-sample; see its caveats above.
 - Recommendations are advisory. Payment execution is deliberately out of scope.
