@@ -21,7 +21,7 @@ Accounts-payable teams match every vendor invoice against a purchase order (PO) 
 
 - Evidence values are filled in from the records the agent actually retrieved. The model only names which fields matter, so it cannot invent numbers. Any number in its prose that is not in the retrieved data is logged as `unverified_numbers`.
 - `requires_human_approval` is always true, and every investigated case ends in `awaiting_review`.
-- Missing or contradictory evidence forces `escalate` with `low` confidence.
+- Missing evidence, or several independent discrepancies on one invoice (for example amount and quantity both off), forces `escalate` with `low` confidence.
 - A vendor-name mismatch can never be auto-rejected or approved; it becomes a clarification request.
 - If the agent produces no valid finding, the case is escalated rather than guessed.
 - Status transitions are validated, and the case update and its audit event commit in one transaction.
@@ -62,7 +62,7 @@ Runs are idempotent: one case per invoice, so re-running never duplicates work.
 
 ## Demo data
 
-All data is synthetic and generated deterministically (`python -m app.seed`): 42 invoices, with 9 seeded anomalies (amount, quantity, vendor-name, stale-date and missing-receipt cases, plus a contradictory-evidence case), one exact duplicate and 30 clean invoices. A within-tolerance invoice checks that the rules do not over-flag.
+All data is synthetic and generated deterministically (`python -m app.seed`): 42 invoices, of which 10 are flagged (an exact duplicate, a stale invoice and 8 seeded anomalies covering amount, quantity, vendor-name, date and missing-receipt cases, including one where a receiving note explains an overcharge without authorizing it) and 32 are not (including one within-tolerance invoice that checks the rules do not over-flag, and the original of the duplicate).
 
 ## Evaluation (measured, with caveats)
 

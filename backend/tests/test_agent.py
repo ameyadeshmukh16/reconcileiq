@@ -62,7 +62,7 @@ def test_missing_evidence_forces_escalate_low(conn, monkeypatch):
     assert any("missing evidence" in g for g in guard)
 
 
-def test_contradictory_evidence_forces_escalate_low(conn, monkeypatch):
+def test_multiple_discrepancies_force_escalate_low(conn, monkeypatch):
     c = case_for(conn, "INV-55102")
     script(monkeypatch, steps("INV-55102", "PO-77620", True)
            + [msg(finding(recommendation="request_vendor_clarification", confidence="medium"))])

@@ -225,7 +225,7 @@ def _unverified_numbers(facts: list[str], tool_results: list[dict]) -> list[str]
 
 
 def _apply_guardrails(f: Finding, anomaly_type: str, evidence_missing: bool,
-                      contradictory: bool = False) -> tuple[Finding, list[str]]:
+                      multiple_discrepancies: bool = False) -> tuple[Finding, list[str]]:
     notes = []
     if f.recommendation not in ("approve", "request_vendor_clarification", "escalate", "reject"):
         f.recommendation = "escalate"; notes.append("invalid recommendation -> escalate")
@@ -235,9 +235,9 @@ def _apply_guardrails(f: Finding, anomaly_type: str, evidence_missing: bool,
         if f.recommendation != "escalate" or f.confidence != "low":
             notes.append("missing evidence: forced escalate/low")
         f.recommendation, f.confidence = "escalate", "low"
-    if contradictory and (f.recommendation != "escalate" or f.confidence != "low"):
+    if multiple_discrepancies and (f.recommendation != "escalate" or f.confidence != "low"):
         f.recommendation, f.confidence = "escalate", "low"
-        notes.append("contradictory evidence (amount and quantity both mismatch): forced escalate/low")
+        notes.append("multiple independent discrepancies (amount and quantity both off): forced escalate/low")
     if anomaly_type == "vendor_name_mismatch" and f.recommendation in ("reject", "approve"):
         f.recommendation = "request_vendor_clarification"
         notes.append("vendor mismatch: never auto-resolved -> request_vendor_clarification")
@@ -341,9 +341,9 @@ def investigate(conn, case_id: str, order: tuple[str, ...] = ("vultr", "openrout
     evidence_missing = any(r and not r.get("found", True) for k, r in retrieved.items()
                            if k in ("get_po", "get_goods_receipt", "get_invoice"))
     rule_types = {(e.detail or {}).get("rule") for e in cases.get_timeline(conn, case_id) if e.type == "rule_check"}
-    contradictory = {"amount_mismatch", "quantity_mismatch"} <= rule_types
+    multiple_discrepancies = {"amount_mismatch", "quantity_mismatch"} <= rule_types
     if guardrails:
-        finding, notes = _apply_guardrails(finding, case.anomaly_type, evidence_missing, contradictory)
+        finding, notes = _apply_guardrails(finding, case.anomaly_type, evidence_missing, multiple_discrepancies)
     else:
         notes = []
     bad_numbers = _unverified_numbers(
