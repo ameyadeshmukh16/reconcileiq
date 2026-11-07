@@ -34,10 +34,11 @@ def run_investigation() -> None:
                     "SELECT case_id FROM cases WHERE status IN ('received','investigating') ORDER BY flagged_at")]:
                 try:
                     investigator.investigate(conn, case_id)
-                except (llm.ConfigError, Exception) as exc:   # noqa: BLE001
+                except Exception as exc:   # noqa: BLE001
                     log.error("investigation failed for %s: %r", case_id, exc)
                     if isinstance(exc, llm.ConfigError) or type(exc).__name__ == "AuthenticationError":
-                        break            # misconfiguration will fail every case; stop and surface it loudly
+                        break            # misconfiguration fails every case: stop, leave them pending, fix the key
+                    investigator.escalate_on_failure(conn, case_id, exc)   # otherwise fail safe to a human
         finally:
             conn.close()
     finally:

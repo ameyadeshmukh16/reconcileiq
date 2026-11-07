@@ -41,7 +41,7 @@ export const DecisionBar: React.FC<DecisionBarProps> = ({ caseData, onCaseResolv
       addToast(
         decision === "approved"
           ? `Recommendation accepted for ${caseData.invoice_number}.`
-          : `Case ${caseData.invoice_number} dismissed.`,
+          : `Recommendation overridden for ${caseData.invoice_number}; case closed.`,
         "success",
         "Decision Recorded"
       );
@@ -67,7 +67,7 @@ export const DecisionBar: React.FC<DecisionBarProps> = ({ caseData, onCaseResolv
               ) : (
                 <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded text-[11px] font-semibold text-gray-700 bg-gray-200 shrink-0">
                   <XCircle className="w-3 h-3 text-gray-600" />
-                  Case Dismissed
+                  Recommendation Overridden
                 </span>
               )}
               <span className="text-gray-400">·</span>
@@ -162,22 +162,25 @@ export const DecisionBar: React.FC<DecisionBarProps> = ({ caseData, onCaseResolv
 
             {/* Right: The two buttons */}
             <div className="flex items-center gap-2 shrink-0">
+              <span className="hidden xl:inline text-[11px] text-gray-400 mr-1">Records your review only. No payment is made.</span>
               <button
                 type="button"
                 onClick={() => handleDecision("dismissed")}
+                title="Disagree with the agent: close this case without following its recommendation (reason required)"
                 disabled={submitting}
                 className="px-3 py-1.5 text-xs font-semibold text-gray-700 bg-white hover:bg-gray-100 border border-gray-300 rounded transition-colors disabled:opacity-50 whitespace-nowrap"
               >
                 {submitting ? (
                   <Loader2 className="w-3.5 h-3.5 animate-spin" />
                 ) : (
-                  <span>Dismiss case</span>
+                  <span>Override and close</span>
                 )}
               </button>
 
               <button
                 type="button"
                 onClick={() => handleDecision("approved")}
+                title="Agree with the agent and confirm its recommended next step (nothing is paid or sent automatically)"
                 disabled={submitting}
                 className="px-3.5 py-1.5 text-xs font-semibold text-white bg-[#0D5C58] hover:bg-[#0A4D48] active:bg-[#083D39] rounded transition-colors disabled:opacity-50 whitespace-nowrap shadow-2xs"
               >

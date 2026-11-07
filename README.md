@@ -22,6 +22,8 @@ Accounts-payable teams match every vendor invoice against a purchase order (PO) 
 - Evidence values are filled in from the records the agent actually retrieved. The model only names which fields matter, so it cannot invent numbers. Any number in its prose that is not in the retrieved data is logged as `unverified_numbers`.
 - `requires_human_approval` is always true, and every investigated case ends in `awaiting_review`.
 - Missing evidence, or several independent discrepancies on one invoice (for example amount and quantity both off), forces `escalate` with `low` confidence.
+- `approve` is overridden to `escalate` when the invoice overbills beyond tolerance with no recorded PO amendment that covers it, or bills more units than were received. A receiving note explains a difference; it never authorizes it.
+- The model can only retrieve the case's own invoice and PO. A crashed investigation moves the case to human review as `escalate`/low instead of stranding it.
 - A vendor-name mismatch can never be auto-rejected or approved; it becomes a clarification request.
 - If the agent produces no valid finding, the case is escalated rather than guessed.
 - Status transitions are validated, and the case update and its audit event commit in one transaction.
@@ -66,22 +68,30 @@ All data is synthetic and generated deterministically (`python -m app.seed`): 42
 
 ## Evaluation (measured, with caveats)
 
-`python -m app.evaluation.run` runs 17 flagged cases (+2 that must stay clean) through three modes: rules only, rules + agent with the guardrails switched off, and rules + agent + guardrails. Full tables: [docs/eval-results.md](docs/eval-results.md). Run on Vultr Serverless Inference (`deepseek-v4.1-flash-1017`), temperature 0, one run per mode.
+`python -m app.evaluation.run` runs 20 flagged cases (+2 that must stay clean) through three modes: rules only, rules + agent with the guardrails switched off, and rules + agent + guardrails. Full tables and per-case outputs: [docs/eval-results.md](docs/eval-results.md) (stamped with code commit, date, provider and model). Run on Vultr Serverless Inference (`deepseek-v4.1-flash-1017`), temperature 0, one run per mode. A snapshot, not a benchmark.
 
-| Mode (17 flagged cases) | Acceptable | Unsafe | Key finding stated* | Median latency | Median tokens |
-|---|---:|---:|---:|---:|---:|
-| Rules only | 17/17 | 0 | 2/6 | - | - |
-| Agent, no guardrails | 16/17 | 0 | 6/6 | 8.6 s | ~8.0k |
-| Agent + guardrails | 17/17 | 0 | 6/6 | 11.2 s | ~8.2k |
+| Mode (20 flagged cases; 10 holdout) | Acceptable | Unsafe | Holdout acceptable | Model text addresses key point* | Median latency | Total tokens |
+|---|---:|---:|---:|---:|---:|---:|
+| Rules only | 19/20 | 0 | 9/10 | 0/9 | - | - |
+| Agent, no guardrails | 20/20 | 0 | 10/10 | 9/9 | 14.3 s | ~173k |
+| Agent + guardrails | 20/20 | 0 | 10/10 | 9/9 | 13.8 s | ~163k |
 
-*Of 6 cases labelled with a key point a reviewer needs (for example "no approved amendment is on file"), how many outputs state it.
+*Of 9 cases labelled with a key point a reviewer needs (for example "no approved amendment on file"), how many outputs have the **model's own text** address it. Backend-built facts are scored in a separate column and are excluded here.
 
 What this does and does not show:
-- **Safety is not the differentiator here.** No mode approved an unauthorized case, including the prompt-injection case (a receiving note telling the reviewer to approve). Rules-only reaches 17/17 only because it escalates everything, which is safe but gives the reviewer nothing. The labels accept several defensible answers, so "acceptable" cannot separate the modes well.
-- **The agent's value is in what it tells the reviewer** (the missing authorization, the partial-receipt totals, the specific follow-up action), not in a better accept/reject choice. The key-point count is partly satisfied by the backend-built facts, which both agent modes use, so it overstates the model's own contribution.
-- **The guardrails never had to override the model on this model.** In the guarded run, zero overrides and zero rejected submissions fired. The one difference (INV-72901: `reject` unguarded, `escalate` guarded) is a single run at temperature 0 and may be run-to-run variance, not proof. Earlier manual testing showed the weaker free OpenRouter fallback model was less cautious on contradictory evidence, which is why the guardrails exist; a run on that model could not be completed because its free-tier daily rate limit was exhausted.
-- **Small and partly in-sample.** The 10 dev cases are what the prompts were built against; only the 7 holdout cases were labelled before any model ran. Labels are the author's judgement. n is too small for statistical claims.
+- **Where the agent earns its place:** INV-E09 is 8% over the PO but a recorded, approved PO amendment covers it. Rules-only (which cannot see amendments) escalates it; the agent finds the amendment and recommends `approve`. Rules-only is only wrong on that one case because the labels accept several defensible answers for the rest. The remaining gap is explanation, the missing authorization, the partial-receipt totals and the drafted follow-up, which only the agent provides.
+- **Safety is not the differentiator in the live run.** No mode approved an unauthorized case, including the prompt-injection case. Nothing in the guarded run needed an override or a contract rejection, so **the live run does not demonstrate that the guardrails work**; it only shows this model did not need them.
+- **The guardrails are tested deterministically instead:** `backend/tests/test_agent.py` drives scripted bad agents through the backend: an agent that follows the injected "approve" is overridden to `escalate`; an amendment on a different PO, or one too small, does not authorize; no amendment can justify billing unreceived goods; submitting before retrieval is rejected; requests for another invoice or PO are refused; invented evidence references are dropped.
+- **Small and partly in-sample.** The 10 dev cases are what the prompts were built against; the 10 holdout cases were labelled before any model ran on them. Labels are the author's judgement. n is too small for statistical claims.
 - **Cost:** token counts are measured; no dollar figure is given because the per-token price is not recorded here.
+
+## Reviewer actions
+
+The two buttons record a review outcome only. Nothing is paid or sent.
+- **Accept recommendation** (stored as `approved`): the reviewer agrees with the agent's recommended next step, for example "escalate to procurement".
+- **Override and close** (stored as `dismissed`): the reviewer disagrees and closes the case without following it. A reason is required.
+
+The decision is attributed to the authenticated user; the typed reviewer name is stored as self-declared. The audit event records the agent's recommendation and confidence at decision time.
 
 ## Run locally
 
@@ -91,7 +101,7 @@ docker compose up --build
 curl http://localhost:8000/api/health
 ```
 
-Tests: `cd backend && pip install -r requirements.txt && pytest` (35 tests; the agent tests use a scripted fake LLM, so no network or keys are needed).
+Tests: `cd backend && pip install -r requirements.txt && pytest` (45 tests; the agent tests use a scripted fake LLM, so no network or keys are needed).
 
 ## Deploy to a Vultr VM
 

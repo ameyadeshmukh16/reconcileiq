@@ -92,14 +92,14 @@ export const CaseDetailPage: React.FC<CaseDetailPageProps> = ({ caseId }) => {
         return (
           <span className="inline-flex items-center gap-1 px-2.5 py-0.5 rounded-full text-[11px] font-medium bg-[#CCFBF1] text-[#0D5C58]">
             <CheckCircle2 className="w-3 h-3 text-[#0D5C58]" />
-            Approved
+            Accepted
           </span>
         );
       case "dismissed":
         return (
           <span className="inline-flex items-center gap-1 px-2.5 py-0.5 rounded-full text-[11px] font-medium bg-gray-100 text-gray-700">
             <XCircle className="w-3 h-3 text-gray-500" />
-            Dismissed
+            Overridden
           </span>
         );
       default:

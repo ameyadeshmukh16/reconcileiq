@@ -197,3 +197,69 @@ def test_po_approvals_tool_reports_absence_and_presence(conn):
     conn.execute("INSERT INTO po_amendments VALUES ('AM-1','PO-77620','buyer.jones','2026-11-01',NULL,21600,'bulk tier')")
     got = da.get_po_approvals(conn, "PO-77620")
     assert got["found"] and got["amendments"][0]["approved_by"] == "buyer.jones"
+
+
+# ---------- authorization guardrail: explanation is not authorization ----------
+
+def _approve_after_steps(conn, monkeypatch, number, po, numeric=True):
+    c = case_for(conn, number)
+    script(monkeypatch, steps(number, po, numeric) + [msg(finding(recommendation="approve", confidence="high"))])
+    return c, investigator.investigate(conn, c.case_id)
+
+
+def test_agent_following_injected_approve_is_overridden(conn, monkeypatch):
+    c, out = _approve_after_steps(conn, monkeypatch, "INV-88204", "PO-77194")      # 4.5% over PO, no amendment
+    assert (out.recommendation, out.confidence) == ("escalate", "low")
+    notes = cases.get_timeline(conn, c.case_id)[-1].detail["guardrail_adjustments"]
+    assert any("unauthorized overbilling" in n for n in notes)
+
+
+def test_amendment_on_another_po_does_not_authorize(conn, monkeypatch):
+    conn.execute("INSERT INTO po_amendments VALUES ('AM-X','PO-77620','buyer','2026-11-01',NULL,99999,'other PO')")
+    _, out = _approve_after_steps(conn, monkeypatch, "INV-88204", "PO-77194")
+    assert out.recommendation == "escalate"
+    assert "No approved amendment is on file for PO PO-77194" in " ".join(out.finding_facts)
+
+
+def test_amendment_that_is_too_small_does_not_authorize(conn, monkeypatch):
+    conn.execute("INSERT INTO po_amendments VALUES ('AM-S','PO-77194','buyer','2026-11-01',NULL,10200,'partial')")
+    _, out = _approve_after_steps(conn, monkeypatch, "INV-88204", "PO-77194")
+    assert out.recommendation == "escalate"
+    assert "does NOT cover the invoice amount" in " ".join(out.finding_facts)
+
+
+def test_covering_amendment_lets_approve_stand(conn, monkeypatch):
+    conn.execute("INSERT INTO po_amendments VALUES ('AM-OK','PO-77194','buyer.jones','2026-11-01',250,10450,'approved increase')")
+    c, out = _approve_after_steps(conn, monkeypatch, "INV-88204", "PO-77194")
+    assert (out.recommendation, out.confidence) == ("approve", "high")
+    assert "covers the invoice amount" in " ".join(out.finding_facts)
+    assert not cases.get_timeline(conn, c.case_id)[-1].detail["guardrail_adjustments"]
+
+
+def test_no_amendment_can_justify_billing_unreceived_goods(conn, monkeypatch):
+    conn.execute("INSERT INTO po_amendments VALUES ('AM-Q','PO-77488','buyer','2026-11-01',500,38500,'qty')")
+    _, out = _approve_after_steps(conn, monkeypatch, "INV-72901", "PO-77488")        # billed 500, received 460
+    assert out.recommendation == "escalate"
+
+
+# ---------- retrieval is bound to the case ----------
+
+def test_requests_for_other_invoices_or_pos_are_refused(conn, monkeypatch):
+    c = case_for(conn, "INV-88204")
+    foreign = [msg(call("get_invoice", invoice_number="INV-55102")), msg(call("get_po", po_number="PO-77620")),
+               msg(call("get_goods_receipt", po_number="PO-77620")), msg(call("get_po_approvals", po_number="PO-77620"))]
+    script(monkeypatch, foreign + steps("INV-88204", "PO-77194", True) + [msg(finding(recommendation="escalate"))])
+    out = investigator.investigate(conn, c.case_id)
+    facts = " ".join(out.finding_facts)
+    assert "INV-55102" not in facts and "PO-77620" not in facts and "special bulk tier" not in facts
+    detail = cases.get_timeline(conn, c.case_id)[-1].detail
+    assert len(detail["out_of_scope_requests"]) == 4
+    assert out.recommendation == "escalate"
+
+
+def test_calculator_operands_do_not_change_backend_facts(conn, monkeypatch):
+    c = case_for(conn, "INV-88204")
+    script(monkeypatch, [msg(call("calculate_difference", a=1, b=1))] + steps("INV-88204", "PO-77194", True)
+           + [msg(finding(recommendation="escalate"))])
+    out = investigator.investigate(conn, c.case_id)
+    assert "450.00 (4.5%) above the PO amount" in " ".join(out.finding_facts)

@@ -126,3 +126,56 @@ def test_client_cannot_impersonate_another_reviewer(client):
     assert out["resolved_by"].startswith("admin")               # authenticated identity is always recorded
     evt = client.get(f"/api/cases/{cid}").json()["timeline"][-1]
     assert evt["detail"]["authenticated_user"] == "admin" and evt["detail"]["declared_reviewer"] == "CFO"
+
+
+def test_failed_investigation_fails_safe_to_human(client, monkeypatch):
+    calls = {"n": 0}
+
+    def flaky(conn, case_id, order=()):
+        calls["n"] += 1
+        if calls["n"] == 3:
+            raise RuntimeError("provider exploded")          # unexpected failure on one case
+        cases.transition(conn, case_id, "investigating", "agent", "started")
+        cases.transition(conn, case_id, "awaiting_review", "agent", "done", fields={"recommendation": "approve"})
+    monkeypatch.setattr(investigator, "investigate", flaky)
+    client.post("/api/runs", headers=AUTH)
+    wait_idle()
+    rows = client.get("/api/cases").json()
+    assert len(rows) == 10 and all(c["status"] == "awaiting_review" for c in rows)     # nothing stranded
+    failed = [c for c in rows if c["recommendation"] == "escalate" and c["confidence"] == "low"
+              and "could not be completed" in c["finding"]]
+    assert len(failed) == 1                                                            # the rest carried on
+    ev = client.get(f"/api/cases/{failed[0]['case_id']}").json()["timeline"][-1]
+    assert ev["detail"]["error_class"] == "RuntimeError" and "exploded" not in str(ev)  # no error text leaked
+
+
+def test_restart_resumes_case_stuck_in_investigating(tmp_path, monkeypatch):
+    from app import pipeline
+    monkeypatch.setattr(config, "DB_PATH", str(tmp_path / "r.db"))
+    monkeypatch.setattr(config, "AUTO_RUN_ON_START", True)
+    conn = pipeline.bootstrap()
+    pipeline.run_pipeline(conn)
+    stuck = next(c for c in cases.list_cases(conn) if c.detection_method == "agent_investigation")
+    cases.transition(conn, stuck.case_id, "investigating", "agent", "started")        # simulate crash mid-investigation
+    conn.close()
+    seen = []
+
+    def fake(conn, case_id, order=()):
+        seen.append(case_id)
+        if cases.get_case(conn, case_id).status == "received":
+            cases.transition(conn, case_id, "investigating", "agent", "started")
+        cases.transition(conn, case_id, "awaiting_review", "agent", "done", fields={"recommendation": "escalate"})
+    monkeypatch.setattr(investigator, "investigate", fake)
+    main.state.active = False
+    with TestClient(main.app):
+        wait_idle()
+    assert stuck.case_id in seen
+
+
+def test_decision_event_records_agent_recommendation_for_override_audit(client):
+    client.post("/api/runs", headers=AUTH)
+    wait_idle()
+    cid = client.get("/api/cases?status=awaiting_review").json()[0]["case_id"]
+    client.patch(f"/api/cases/{cid}", json={"decision": "dismissed", "reason": "vendor confirmed by phone", "actor": "a"}, headers=AUTH)
+    d = client.get(f"/api/cases/{cid}").json()["timeline"][-1]["detail"]
+    assert d["agent_recommendation"] == "escalate" and d["meaning"].startswith("overrode")

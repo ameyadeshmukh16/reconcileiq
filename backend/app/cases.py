@@ -88,7 +88,7 @@ def decide(conn, case_id: str, decision: str, actor: str, reason: str, declared_
     ts = now()
     conn.execute("BEGIN IMMEDIATE") if not conn.in_transaction else None
     try:
-        row = conn.execute("SELECT status FROM cases WHERE case_id=?", (case_id,)).fetchone()
+        row = conn.execute("SELECT status, recommendation, confidence FROM cases WHERE case_id=?", (case_id,)).fetchone()
         if row is None:
             raise NotFoundError(case_id)
         if decision not in TRANSITIONS[row["status"]]:
@@ -99,7 +99,10 @@ def decide(conn, case_id: str, decision: str, actor: str, reason: str, declared_
                      (decision, ts, who, reason.strip(), case_id))
         add_event(conn, case_id, "human", "decision",
                   f"{'Approved' if decision == 'approved' else 'Dismissed'} by {who}",
-                  {"decision": decision, "authenticated_user": actor.strip(),
+                  {"decision": decision, "meaning": ("accepted agent recommendation" if decision == "approved"
+                                                    else "overrode agent recommendation and closed"),
+                   "agent_recommendation": row["recommendation"], "agent_confidence": row["confidence"],
+                   "authenticated_user": actor.strip(),
                    "declared_reviewer": declared or None, "reason": reason.strip()}, ts=ts)
         conn.commit()
     except Exception:
