@@ -11,6 +11,7 @@ Guardrails are enforced HERE in code, not only in the prompt:
 """
 import json
 import re
+import time
 
 from pydantic import BaseModel, ValidationError
 
@@ -243,7 +244,10 @@ def _apply_guardrails(f: Finding, anomaly_type: str, evidence_missing: bool,
     return f, notes
 
 
-def investigate(conn, case_id: str, order: tuple[str, ...] = ("vultr", "openrouter")) -> cases.Case:
+def investigate(conn, case_id: str, order: tuple[str, ...] = ("vultr", "openrouter"),
+                guardrails: bool = True) -> cases.Case:
+    """`guardrails=False` disables the enforced contract and the rule-based overrides. It exists only so the
+    evaluation can measure what the guardrails add; the API never passes it."""
     case = cases.get_case(conn, case_id)
     if case.status == "received":
         cases.transition(conn, case_id, "investigating", "agent", "Agent investigation started")
@@ -261,9 +265,15 @@ def investigate(conn, case_id: str, order: tuple[str, ...] = ("vultr", "openrout
     rejected: list[list[str]] = []
     results: list[dict] = []
     finding, provider, model, nudged = None, "none", None, False
+    t0 = time.perf_counter()
+    usage = {"llm_calls": 0, "prompt_tokens": 0, "completion_tokens": 0}
 
     for _ in range(MAX_STEPS):
         msg, provider, model = llm.chat(messages, TOOLS, order)
+        u = llm.last_usage()
+        usage["llm_calls"] += 1
+        usage["prompt_tokens"] += u.get("prompt_tokens", 0)
+        usage["completion_tokens"] += u.get("completion_tokens", 0)
         calls = msg.tool_calls or []
         if not calls:
             if nudged:
@@ -281,7 +291,7 @@ def investigate(conn, case_id: str, order: tuple[str, ...] = ("vultr", "openrout
             except json.JSONDecodeError:
                 args = {}
             if c.function.name == "submit_finding":
-                missing = sorted(_required_steps(case.anomaly_type, retrieved) - called)
+                missing = sorted(_required_steps(case.anomaly_type, retrieved) - called) if guardrails else []
                 if missing:
                     rejected.append(missing)
                     out = {"error": "finding NOT accepted: required steps not done yet. Call these tools first: "
@@ -312,7 +322,8 @@ def investigate(conn, case_id: str, order: tuple[str, ...] = ("vultr", "openrout
             conn, case_id, "awaiting_review", "agent",
             "Investigation incomplete; escalated for manual review",
             {"reason": "agent produced no valid finding", "provider": provider, "model": model,
-             "rejected_submissions_missing_steps": rejected},
+             "rejected_submissions_missing_steps": rejected,
+             "metrics": {**usage, "elapsed_s": round(time.perf_counter() - t0, 2)}},
             fields={"recommendation": "escalate", "confidence": "low", "investigation_provider": provider,
                     "investigation_model": model,
                     "finding": "Automated investigation did not produce a valid finding; manual review required.",
@@ -331,7 +342,10 @@ def investigate(conn, case_id: str, order: tuple[str, ...] = ("vultr", "openrout
                            if k in ("get_po", "get_goods_receipt", "get_invoice"))
     rule_types = {(e.detail or {}).get("rule") for e in cases.get_timeline(conn, case_id) if e.type == "rule_check"}
     contradictory = {"amount_mismatch", "quantity_mismatch"} <= rule_types
-    finding, notes = _apply_guardrails(finding, case.anomaly_type, evidence_missing, contradictory)
+    if guardrails:
+        finding, notes = _apply_guardrails(finding, case.anomaly_type, evidence_missing, contradictory)
+    else:
+        notes = []
     bad_numbers = _unverified_numbers(
         finding.verified_facts + [finding.interpretation, finding.recommendation_rationale], results)
     facts = build_facts(retrieved)
@@ -344,7 +358,8 @@ def investigate(conn, case_id: str, order: tuple[str, ...] = ("vultr", "openrout
         {"recommendation": finding.recommendation, "confidence": finding.confidence, "provider": provider,
          "model": model, "dropped_evidence_refs": dropped, "guardrail_adjustments": notes,
          "unverified_numbers": bad_numbers, "model_scratch_observations": finding.verified_facts,
-         "rejected_submissions_missing_steps": rejected},
+         "rejected_submissions_missing_steps": rejected,
+         "metrics": {**usage, "elapsed_s": round(time.perf_counter() - t0, 2)}},
         fields={"recommendation": finding.recommendation, "confidence": finding.confidence,
                 "recommendation_rationale": finding.recommendation_rationale, "finding": text,
                 "finding_facts": json.dumps(facts), "finding_interpretation": finding.interpretation,
