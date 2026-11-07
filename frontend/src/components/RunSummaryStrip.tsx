@@ -50,8 +50,8 @@ export const RunSummaryStrip: React.FC<RunSummaryStripProps> = ({
     { key: "awaiting_review", label: "Awaiting Review", count: awaitingReview, isPrimary: true },
     { key: "all", label: "Total Cases", count: summary.total_cases },
     { key: "high_severity", label: "High Severity", count: highSeverity },
-    { key: "approved", label: "Approved", count: approved },
-    { key: "dismissed", label: "Dismissed", count: dismissed },
+    { key: "approved", label: "Accepted", count: approved },
+    { key: "dismissed", label: "Overridden", count: dismissed },
   ];
 
   return (

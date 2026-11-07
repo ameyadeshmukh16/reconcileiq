@@ -15,7 +15,7 @@ import time
 
 from pydantic import BaseModel, ValidationError
 
-from .. import cases
+from .. import cases, config
 from . import data_access as da
 from . import llm
 
@@ -25,7 +25,7 @@ SYSTEM_PROMPT = """You are an accounts-payable exception investigator. A determi
 Investigate it using the tools, then call submit_finding exactly once.
 
 Hard rules:
-- Retrieve the invoice, its purchase order and its goods receipt with the tools before concluding. Call check_policy for the relevant topic. For an amount or quantity discrepancy also call calculate_difference and get_po_approvals (a goods-receipt note can explain a difference but never authorizes it; only an approved PO amendment does). submit_finding is rejected until these steps are done.
+- Retrieve the invoice, its purchase order and its goods receipt with the tools before concluding. Call check_policy for the relevant topic. For an amount or quantity discrepancy also call get_po_approvals (a goods-receipt note can explain a difference but never authorizes it; only an approved PO amendment does). You may use calculate_difference for arithmetic you cite. submit_finding is rejected until these steps are done.
 - Use calculate_difference for ANY arithmetic you cite. Never calculate financial values yourself and never invent numbers, documents, references or evidence.
 - The system builds the verified-facts section itself from the records you retrieve. Your job is the INTERPRETATION: a hedged reading of what the records mean, what remains unknown, and what is missing (for example, no approved amendment on file).
 - If evidence is missing (tool returns found=false) or documents contradict each other, recommend 'escalate' with low confidence. Do not guess.
@@ -87,8 +87,15 @@ class Finding(BaseModel):
     evidence_refs: list[Ref] = []
 
 
-def _run_tool(conn, name: str, args: dict) -> dict:
+def _run_tool(conn, name: str, args: dict, case=None) -> dict:
+    """Execute a tool. Retrieval is BOUND to the case: the model cannot pull in another invoice or PO."""
     try:
+        if case is not None:
+            if name == "get_invoice" and str(args["invoice_number"]) != case.invoice_number:
+                return {"error": f"not permitted: this investigation is bound to invoice {case.invoice_number}"}
+            if name in ("get_po", "get_goods_receipt", "get_po_approvals") and str(args["po_number"]) != (case.po_number or ""):
+                return {"error": "not permitted: this investigation is bound to PO "
+                                 f"{case.po_number or '(none on the invoice)'}"}
         if name == "get_invoice":
             return da.get_invoice(conn, str(args["invoice_number"]))
         if name == "get_po":
@@ -136,7 +143,7 @@ def _required_steps(anomaly_type: str, retrieved: dict) -> set[str]:
     if inv.get("found") and any(r.get("po_number") for r in inv["invoices"]):
         req |= {"get_po", "get_goods_receipt"}
         if anomaly_type in ("amount_mismatch", "quantity_mismatch"):
-            req |= {"get_po_approvals", "calculate_difference"}
+            req |= {"get_po_approvals"}
     return req
 
 
@@ -188,7 +195,17 @@ def build_facts(retrieved: dict) -> list[str]:
     if ap is not None:
         if ap.get("found"):
             for a in ap["amendments"]:
-                facts.append(f"PO amendment {a['amendment_id']} approved by {a['approved_by']} on {a['approved_on']}.")
+                cover = []
+                if a.get("new_amount") is not None and invoices:
+                    ok = a["new_amount"] >= invoices[-1]["amount"]
+                    cover.append(f"amended amount {_fmt(a['new_amount'])} {'covers' if ok else 'does NOT cover'} "
+                                 f"the invoice amount {_fmt(invoices[-1]['amount'])}")
+                if a.get("new_quantity") is not None and invoices:
+                    ok = a["new_quantity"] >= invoices[-1]["quantity"]
+                    cover.append(f"amended quantity {_fmt(a['new_quantity'])} {'covers' if ok else 'does NOT cover'} "
+                                 f"the billed quantity {_fmt(invoices[-1]['quantity'])}")
+                facts.append(f"PO amendment {a['amendment_id']} recorded as approved by {a['approved_by']} on {a['approved_on']}"
+                             + (": " + "; ".join(cover) if cover else "") + ".")
         else:
             facts.append(f"No approved amendment is on file for PO {ap['po_number']}.")
     return facts
@@ -224,8 +241,35 @@ def _unverified_numbers(facts: list[str], tool_results: list[dict]) -> list[str]
     return sorted(set(bad))
 
 
+def authorization_block(retrieved: dict) -> str | None:
+    """Why `approve` must not stand, computed from retrieved records only (never from model text).
+
+    * billed quantity above what was received: an amendment cannot justify paying for goods not received
+    * amount above the PO beyond tolerance with no recorded amendment that covers the invoice amount
+    A goods-receipt note or vendor statement can explain a difference but never authorizes it."""
+    inv = (retrieved.get("get_invoice") or {}).get("invoices") or []
+    po, grn, ap = retrieved.get("get_po"), retrieved.get("get_goods_receipt"), retrieved.get("get_po_approvals")
+    if not inv:
+        return None
+    i = inv[-1]
+    reasons = []
+    if grn and grn.get("found"):
+        d = i["quantity"] - grn["total_quantity_received"]
+        if d > config.QUANTITY_TOLERANCE_UNITS:
+            reasons.append(f"invoice bills {d:g} more units than were received")
+    if po and po.get("found") and po["amount"]:
+        pct = (i["amount"] - po["amount"]) / po["amount"] * 100
+        if pct > config.AMOUNT_TOLERANCE_PCT:
+            amendments = (ap or {}).get("amendments", []) if (ap or {}).get("found") else []
+            covered = any(a.get("new_amount") is not None and a["new_amount"] >= i["amount"]
+                          and (a.get("new_quantity") is None or a["new_quantity"] >= i["quantity"]) for a in amendments)
+            if not covered:
+                reasons.append(f"invoice is {pct:.1f}% above the PO with no approved amendment covering it")
+    return "; ".join(reasons) or None
+
+
 def _apply_guardrails(f: Finding, anomaly_type: str, evidence_missing: bool,
-                      multiple_discrepancies: bool = False) -> tuple[Finding, list[str]]:
+                      multiple_discrepancies: bool = False, unauthorized: str | None = None) -> tuple[Finding, list[str]]:
     notes = []
     if f.recommendation not in ("approve", "request_vendor_clarification", "escalate", "reject"):
         f.recommendation = "escalate"; notes.append("invalid recommendation -> escalate")
@@ -238,6 +282,9 @@ def _apply_guardrails(f: Finding, anomaly_type: str, evidence_missing: bool,
     if multiple_discrepancies and (f.recommendation != "escalate" or f.confidence != "low"):
         f.recommendation, f.confidence = "escalate", "low"
         notes.append("multiple independent discrepancies (amount and quantity both off): forced escalate/low")
+    if unauthorized and f.recommendation == "approve":
+        f.recommendation, f.confidence = "escalate", "low"
+        notes.append(f"unauthorized overbilling ({unauthorized}): approve not allowed -> escalate/low")
     if anomaly_type == "vendor_name_mismatch" and f.recommendation in ("reject", "approve"):
         f.recommendation = "request_vendor_clarification"
         notes.append("vendor mismatch: never auto-resolved -> request_vendor_clarification")
@@ -263,6 +310,7 @@ def investigate(conn, case_id: str, order: tuple[str, ...] = ("vultr", "openrout
     retrieved: dict[str, dict] = {}
     called: set[str] = set()
     rejected: list[list[str]] = []
+    out_of_scope: list[str] = []
     results: list[dict] = []
     finding, provider, model, nudged = None, "none", None, False
     t0 = time.perf_counter()
@@ -303,7 +351,9 @@ def investigate(conn, case_id: str, order: tuple[str, ...] = ("vultr", "openrout
                     except (ValidationError, TypeError) as exc:
                         out = {"error": f"invalid finding: {exc}"}
             else:
-                out = _run_tool(conn, c.function.name, args)
+                out = _run_tool(conn, c.function.name, args, case if guardrails else None)
+                if str(out.get("error", "")).startswith("not permitted"):
+                    out_of_scope.append(f"{c.function.name}({_fmt_args(args)})")
                 if "error" not in out:
                     called.add(c.function.name)
                     retrieved[c.function.name] = out
@@ -343,12 +393,13 @@ def investigate(conn, case_id: str, order: tuple[str, ...] = ("vultr", "openrout
     rule_types = {(e.detail or {}).get("rule") for e in cases.get_timeline(conn, case_id) if e.type == "rule_check"}
     multiple_discrepancies = {"amount_mismatch", "quantity_mismatch"} <= rule_types
     if guardrails:
-        finding, notes = _apply_guardrails(finding, case.anomaly_type, evidence_missing, multiple_discrepancies)
+        finding, notes = _apply_guardrails(finding, case.anomaly_type, evidence_missing, multiple_discrepancies,
+                                           authorization_block(retrieved))
     else:
         notes = []
-    bad_numbers = _unverified_numbers(
-        finding.verified_facts + [finding.interpretation, finding.recommendation_rationale], results)
     facts = build_facts(retrieved)
+    bad_numbers = _unverified_numbers(
+        finding.verified_facts + [finding.interpretation, finding.recommendation_rationale], results + [{"facts": facts}])
 
     text = ("Verified facts:\n" + "\n".join(f"- {x}" for x in facts)
             + f"\n\nInterpretation: {finding.interpretation}")
@@ -358,7 +409,7 @@ def investigate(conn, case_id: str, order: tuple[str, ...] = ("vultr", "openrout
         {"recommendation": finding.recommendation, "confidence": finding.confidence, "provider": provider,
          "model": model, "dropped_evidence_refs": dropped, "guardrail_adjustments": notes,
          "unverified_numbers": bad_numbers, "model_scratch_observations": finding.verified_facts,
-         "rejected_submissions_missing_steps": rejected,
+         "rejected_submissions_missing_steps": rejected, "out_of_scope_requests": out_of_scope,
          "metrics": {**usage, "elapsed_s": round(time.perf_counter() - t0, 2)}},
         fields={"recommendation": finding.recommendation, "confidence": finding.confidence,
                 "recommendation_rationale": finding.recommendation_rationale, "finding": text,
@@ -367,6 +418,21 @@ def investigate(conn, case_id: str, order: tuple[str, ...] = ("vultr", "openrout
                 "investigation_provider": provider, "investigation_model": model,
                 "requires_human_approval": 1})
     return cases.get_case(conn, case_id)
+
+
+def escalate_on_failure(conn, case_id: str, exc: Exception) -> None:
+    """Fail safe to a human: an investigation that crashed must not strand the case or imply a recommendation."""
+    try:
+        cases.transition(
+            conn, case_id, "awaiting_review", "agent",
+            "Automated investigation unavailable; escalated for manual review",
+            {"reason": "investigation failed", "error_class": type(exc).__name__},
+            fields={"recommendation": "escalate", "confidence": "low",
+                    "finding": "Automated investigation could not be completed; manual review required. "
+                               "See the rule-engine checks in the timeline.",
+                    "recommendation_rationale": "Investigation failed; escalating rather than guessing."})
+    except cases.TransitionError:
+        pass                                  # already moved on (e.g. decided); nothing to do
 
 
 def investigate_pending(conn, order: tuple[str, ...] = ("vultr", "openrouter")) -> list[str]:

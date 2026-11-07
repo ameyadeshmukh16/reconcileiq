@@ -105,13 +105,13 @@ export const CaseTable: React.FC<CaseTableProps> = ({
       case "approved":
         return (
           <span className="inline-flex items-center px-2 py-0.5 rounded-full text-[11px] font-medium bg-[#CCFBF1] text-[#0D5C58] whitespace-nowrap">
-            Approved
+            Accepted
           </span>
         );
       case "dismissed":
         return (
           <span className="inline-flex items-center px-2 py-0.5 rounded-full text-[11px] font-medium bg-gray-100 text-gray-600 whitespace-nowrap">
-            Dismissed
+            Overridden
           </span>
         );
       case "investigating":
