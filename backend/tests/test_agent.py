@@ -39,15 +39,22 @@ def finding(**over):
     return call("submit_finding", **base)
 
 
+def steps(number, po, numeric=False):
+    """The retrieval steps the backend requires before it accepts a finding."""
+    out = [msg(call("get_invoice", invoice_number=number)), msg(call("get_po", po_number=po)),
+           msg(call("get_goods_receipt", po_number=po)), msg(call("check_policy", topic="amount"))]
+    if numeric:
+        out += [msg(call("get_po_approvals", po_number=po)), msg(call("calculate_difference", a=2, b=1))]
+    return out
+
+
 def case_for(conn, number):
     return next(c for c in cases.list_cases(conn) if c.invoice_number == number)
 
 
 def test_missing_evidence_forces_escalate_low(conn, monkeypatch):
     c = case_for(conn, "INV-33981")
-    script(monkeypatch, [msg(call("get_invoice", invoice_number="INV-33981")),
-                         msg(call("get_goods_receipt", po_number="PO-77519")),
-                         msg(finding(recommendation="approve", confidence="high"))])
+    script(monkeypatch, steps("INV-33981", "PO-77519") + [msg(finding(recommendation="approve", confidence="high"))])
     out = investigator.investigate(conn, c.case_id)
     assert (out.recommendation, out.confidence) == ("escalate", "low")
     assert out.status == "awaiting_review" and out.requires_human_approval is True
@@ -55,26 +62,25 @@ def test_missing_evidence_forces_escalate_low(conn, monkeypatch):
     assert any("missing evidence" in g for g in guard)
 
 
-def test_contradictory_evidence_forces_escalate_low(conn, monkeypatch):
+def test_multiple_discrepancies_force_escalate_low(conn, monkeypatch):
     c = case_for(conn, "INV-55102")
-    script(monkeypatch, [msg(call("get_invoice", invoice_number="INV-55102")),
-                         msg(finding(recommendation="request_vendor_clarification", confidence="medium"))])
+    script(monkeypatch, steps("INV-55102", "PO-77620", True)
+           + [msg(finding(recommendation="request_vendor_clarification", confidence="medium"))])
     out = investigator.investigate(conn, c.case_id)
     assert (out.recommendation, out.confidence) == ("escalate", "low")
 
 
 def test_vendor_mismatch_never_rejected(conn, monkeypatch):
     c = case_for(conn, "INV-61208")
-    script(monkeypatch, [msg(call("get_invoice", invoice_number="INV-61208")),
-                         msg(finding(recommendation="reject"))])
+    script(monkeypatch, steps("INV-61208", "PO-77340") + [msg(finding(recommendation="reject"))])
     assert investigator.investigate(conn, c.case_id).recommendation == "request_vendor_clarification"
 
 
 def test_invented_evidence_is_dropped_and_logged(conn, monkeypatch):
     c = case_for(conn, "INV-88204")
-    script(monkeypatch, [msg(call("get_invoice", invoice_number="INV-88204")),
-                         msg(finding(evidence_refs=[{"source": "invoice", "field": "amount"},
-                                                    {"source": "goods_receipt", "field": "made_up_field"}]))])
+    script(monkeypatch, steps("INV-88204", "PO-77194", True)
+           + [msg(finding(evidence_refs=[{"source": "invoice", "field": "amount"},
+                                         {"source": "goods_receipt", "field": "made_up_field"}]))])
     out = investigator.investigate(conn, c.case_id)
     assert [(e.field, e.value) for e in out.evidence] == [("amount", 10450.0)]   # value comes from the record
     assert cases.get_timeline(conn, c.case_id)[-1].detail["dropped_evidence_refs"] == ["goods_receipt.made_up_field"]
@@ -82,9 +88,9 @@ def test_invented_evidence_is_dropped_and_logged(conn, monkeypatch):
 
 def test_tool_calls_are_audited_with_real_results(conn, monkeypatch):
     c = case_for(conn, "INV-88204")
-    script(monkeypatch, [msg(call("get_po", po_number="PO-77194")), msg(finding())])
+    script(monkeypatch, steps("INV-88204", "PO-77194", True) + [msg(finding())])
     investigator.investigate(conn, c.case_id)
-    ev = next(e for e in cases.get_timeline(conn, c.case_id) if e.type == "tool_call")
+    ev = next(e for e in cases.get_timeline(conn, c.case_id) if e.detail and e.detail.get("tool") == "get_po")
     assert ev.detail["result"]["amount"] == 10000 and ev.detail["provider"] == "vultr"
 
 
@@ -149,3 +155,45 @@ def test_unconfigured_primary_fails_loudly(monkeypatch):
     monkeypatch.setattr(llm, "providers", lambda: ps)
     with pytest.raises(llm.ConfigError):
         llm.chat([], [])
+
+
+# ---------- evidence integrity and the enforced investigation contract ----------
+
+def test_finding_rejected_until_required_steps_done(conn, monkeypatch):
+    c = case_for(conn, "INV-88204")                       # amount_mismatch: needs approvals + calculation too
+    script(monkeypatch, [msg(call("get_invoice", invoice_number="INV-88204")), msg(finding())]
+           + steps("INV-88204", "PO-77194", True)[1:] + [msg(finding(recommendation="escalate", confidence="medium"))])
+    out = investigator.investigate(conn, c.case_id)
+    assert out.recommendation == "escalate" and out.confidence == "medium"       # accepted only after the steps
+    detail = cases.get_timeline(conn, c.case_id)[-1].detail
+    assert detail["rejected_submissions_missing_steps"]                          # first attempt was refused
+    assert "get_po" in detail["rejected_submissions_missing_steps"][0]
+
+
+def test_agent_that_never_completes_the_steps_escalates(conn, monkeypatch):
+    c = case_for(conn, "INV-88204")
+    script(monkeypatch, [msg(finding())] * 14)
+    out = investigator.investigate(conn, c.case_id)
+    assert (out.status, out.recommendation, out.confidence) == ("awaiting_review", "escalate", "low")
+    assert cases.get_timeline(conn, c.case_id)[-1].detail["rejected_submissions_missing_steps"]
+
+
+def test_verified_facts_come_from_records_not_model_text(conn, monkeypatch):
+    c = case_for(conn, "INV-55102")
+    lie = "The vendor has an approved amendment for 999999.00 signed by the CFO"
+    script(monkeypatch, steps("INV-55102", "PO-77620", True) + [msg(finding(verified_facts=[lie]))])
+    out = investigator.investigate(conn, c.case_id)
+    assert lie not in out.finding and all(lie not in f for f in out.finding_facts)    # model text never shown as verified
+    facts = " ".join(out.finding_facts)
+    assert "No approved amendment is on file for PO PO-77620" in facts
+    assert "1,600.00" in facts and "8.0%" in facts                                      # backend-computed difference
+    assert "special bulk tier" in facts and "not an approval" in facts                 # note shown, labelled as non-approval
+    assert cases.get_timeline(conn, c.case_id)[-1].detail["model_scratch_observations"] == [lie]
+
+
+def test_po_approvals_tool_reports_absence_and_presence(conn):
+    from app.agent import data_access as da
+    assert da.get_po_approvals(conn, "PO-77620") == {"found": False, "po_number": "PO-77620"}
+    conn.execute("INSERT INTO po_amendments VALUES ('AM-1','PO-77620','buyer.jones','2026-11-01',NULL,21600,'bulk tier')")
+    got = da.get_po_approvals(conn, "PO-77620")
+    assert got["found"] and got["amendments"][0]["approved_by"] == "buyer.jones"

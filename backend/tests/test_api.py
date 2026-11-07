@@ -78,7 +78,7 @@ def test_run_then_review_flow(client):
 
     body = {"decision": "approved", "reason": "checked against PO", "actor": "alice"}
     done = client.patch(f"/api/cases/{case['case_id']}", json=body, headers=AUTH)
-    assert done.status_code == 200 and done.json()["status"] == "approved" and done.json()["resolved_by"] == "alice"
+    assert done.status_code == 200 and done.json()["status"] == "approved" and done.json()["resolved_by"] == "admin (declared reviewer: alice)"
     assert client.get(f"/api/cases/{case['case_id']}").json()["timeline"][-1]["type"] == "decision"
     assert client.get("/api/runs/latest").json()["by_status"]["approved"] == 1   # live counts
 
@@ -115,3 +115,14 @@ def test_rerun_does_not_duplicate_cases(client):
     client.post("/api/runs", headers=AUTH)
     wait_idle()
     assert len(client.get("/api/cases").json()) == 10
+
+
+def test_client_cannot_impersonate_another_reviewer(client):
+    client.post("/api/runs", headers=AUTH)
+    wait_idle()
+    cid = client.get("/api/cases").json()[0]["case_id"]
+    body = {"decision": "approved", "reason": "r", "actor": "CFO"}
+    out = client.patch(f"/api/cases/{cid}", json=body, headers=AUTH).json()
+    assert out["resolved_by"].startswith("admin")               # authenticated identity is always recorded
+    evt = client.get(f"/api/cases/{cid}").json()["timeline"][-1]
+    assert evt["detail"]["authenticated_user"] == "admin" and evt["detail"]["declared_reviewer"] == "CFO"

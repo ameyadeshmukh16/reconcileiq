@@ -22,7 +22,7 @@ export const DecisionBar: React.FC<DecisionBarProps> = ({ caseData, onCaseResolv
   const handleDecision = async (decision: "approved" | "dismissed") => {
     setErrorMsg("");
     if (!actorName.trim()) {
-      setErrorMsg("Your name is required.");
+      setErrorMsg("Reviewer name is required.");
       return;
     }
     if (!reason.trim()) {
@@ -99,7 +99,7 @@ export const DecisionBar: React.FC<DecisionBarProps> = ({ caseData, onCaseResolv
                   setActorName(e.target.value);
                   if (errorMsg) setErrorMsg("");
                 }}
-                placeholder="Your name"
+                placeholder="Reviewer name (self-declared)"
                 className={`w-32 sm:w-36 px-2.5 py-1.5 text-xs bg-white border rounded text-gray-900 focus:outline-none focus:ring-1 focus:ring-[#0D5C58] shrink-0 ${
                   errorMsg && !actorName ? "border-red-500" : "border-[#D1D5DB]"
                 }`}

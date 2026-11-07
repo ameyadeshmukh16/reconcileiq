@@ -18,6 +18,9 @@ CREATE TABLE IF NOT EXISTS invoices (
     invoice_id TEXT PRIMARY KEY, invoice_number TEXT NOT NULL, vendor_id TEXT NOT NULL,
     vendor_name TEXT NOT NULL, po_number TEXT, invoice_date TEXT NOT NULL,
     quantity REAL NOT NULL, amount REAL NOT NULL);
+CREATE TABLE IF NOT EXISTS po_amendments (
+    amendment_id TEXT PRIMARY KEY, po_number TEXT NOT NULL REFERENCES purchase_orders(po_number),
+    approved_by TEXT NOT NULL, approved_on TEXT NOT NULL, new_quantity REAL, new_amount REAL, note TEXT);
 CREATE TABLE IF NOT EXISTS runs (
     run_id TEXT PRIMARY KEY, started_at TEXT NOT NULL,
     invoices_evaluated INTEGER NOT NULL, clean_count INTEGER NOT NULL, new_cases INTEGER NOT NULL);

@@ -2,13 +2,16 @@
 
 The model retrieves records through tools and submits a structured finding via `submit_finding`.
 Guardrails are enforced HERE in code, not only in the prompt:
-  * evidence values are filled from the records actually retrieved (the model only names fields)
+  * evidence values AND the "verified facts" are built by the backend from retrieved records and
+    deterministic calculations; the model's own prose is interpretation only
+  * submit_finding is rejected until the required retrieval/calculation steps have run (see _required_steps)
   * requires_human_approval is always True; the case always ends in `awaiting_review`
   * missing evidence forces escalate + low confidence; vendor mismatches are never 'reject'
   * provider fallback only on transient errors (see llm.py)
 """
 import json
 import re
+import time
 
 from pydantic import BaseModel, ValidationError
 
@@ -16,15 +19,15 @@ from .. import cases
 from . import data_access as da
 from . import llm
 
-MAX_STEPS = 10
+MAX_STEPS = 14
 
 SYSTEM_PROMPT = """You are an accounts-payable exception investigator. A deterministic rule engine flagged an invoice. \
 Investigate it using the tools, then call submit_finding exactly once.
 
 Hard rules:
-- Retrieve the invoice, its purchase order and its goods receipt with the tools before concluding. Call check_policy for the relevant topic.
+- Retrieve the invoice, its purchase order and its goods receipt with the tools before concluding. Call check_policy for the relevant topic. For an amount or quantity discrepancy also call calculate_difference and get_po_approvals (a goods-receipt note can explain a difference but never authorizes it; only an approved PO amendment does). submit_finding is rejected until these steps are done.
 - Use calculate_difference for ANY arithmetic you cite. Never calculate financial values yourself and never invent numbers, documents, references or evidence.
-- Separate VERIFIED FACTS (what the retrieved records state, with computed numbers from tools) from INTERPRETATION (your hedged reading of them).
+- The system builds the verified-facts section itself from the records you retrieve. Your job is the INTERPRETATION: a hedged reading of what the records mean, what remains unknown, and what is missing (for example, no approved amendment on file).
 - If evidence is missing (tool returns found=false) or documents contradict each other, recommend 'escalate' with low confidence. Do not guess.
 - A vendor-name mismatch is a data-quality question: recommend 'request_vendor_clarification' or 'escalate'. NEVER allege or conclude fraud or impersonation.
 - Absence of a record is never evidence of fraud.
@@ -44,6 +47,9 @@ TOOLS = [
         "name": "get_goods_receipt", "description": "Look up goods receipt(s) for a PO number. found=false means no receipt on file.",
         "parameters": {"type": "object", "properties": {"po_number": {"type": "string"}}, "required": ["po_number"]}}},
     {"type": "function", "function": {
+        "name": "get_po_approvals", "description": "Approved amendments to a PO (the only evidence of commercial authorization for a price or quantity above the PO). found=false means none on file.",
+        "parameters": {"type": "object", "properties": {"po_number": {"type": "string"}}, "required": ["po_number"]}}},
+    {"type": "function", "function": {
         "name": "check_policy", "description": "Get the tolerance policy for a topic.",
         "parameters": {"type": "object", "properties": {"topic": {"type": "string", "enum": sorted(da.POLICIES)}}, "required": ["topic"]}}},
     {"type": "function", "function": {
@@ -55,13 +61,13 @@ TOOLS = [
             "recommendation": {"type": "string", "enum": ["approve", "request_vendor_clarification", "escalate", "reject"]},
             "confidence": {"type": "string", "enum": ["low", "medium", "high"]},
             "recommendation_rationale": {"type": "string", "description": "One sentence specific to this case."},
-            "verified_facts": {"type": "array", "items": {"type": "string"}},
+            "verified_facts": {"type": "array", "items": {"type": "string"}, "description": "Optional scratch observations. NOT displayed as verified; the system builds the verified facts itself."},
             "interpretation": {"type": "string", "description": "One or two hedged sentences."},
             "suggested_action": {"type": "string"},
             "evidence_refs": {"type": "array", "items": {"type": "object", "properties": {
                 "source": {"type": "string", "enum": ["invoice", "purchase_order", "goods_receipt"]},
                 "field": {"type": "string"}}, "required": ["source", "field"]}}},
-            "required": ["recommendation", "confidence", "recommendation_rationale", "verified_facts",
+            "required": ["recommendation", "confidence", "recommendation_rationale",
                          "interpretation", "suggested_action", "evidence_refs"]}}},
 ]
 
@@ -75,7 +81,7 @@ class Finding(BaseModel):
     recommendation: str
     confidence: str
     recommendation_rationale: str
-    verified_facts: list[str]
+    verified_facts: list[str] = []          # model scratch notes; never shown as verified
     interpretation: str
     suggested_action: str
     evidence_refs: list[Ref] = []
@@ -89,6 +95,8 @@ def _run_tool(conn, name: str, args: dict) -> dict:
             return da.get_po(conn, str(args["po_number"]))
         if name == "get_goods_receipt":
             return da.get_goods_receipt(conn, str(args["po_number"]))
+        if name == "get_po_approvals":
+            return da.get_po_approvals(conn, str(args["po_number"]))
         if name == "check_policy":
             return da.check_policy(str(args["topic"]))
         if name == "calculate_difference":
@@ -117,6 +125,73 @@ def _collect_evidence(retrieved: dict) -> dict[tuple[str, str], object]:
     if po and po.get("found"):
         out.update({("purchase_order", k): v for k, v in po.items() if k != "found"})
     return out
+
+
+def _required_steps(anomaly_type: str, retrieved: dict) -> set[str]:
+    """Backend-enforced investigation contract: tools that must have run before a finding is accepted."""
+    req = {"get_invoice", "check_policy"}
+    inv = retrieved.get("get_invoice")
+    if inv is None:
+        return req | {"get_po", "get_goods_receipt"}      # PO number unknown until the invoice is read
+    if inv.get("found") and any(r.get("po_number") for r in inv["invoices"]):
+        req |= {"get_po", "get_goods_receipt"}
+        if anomaly_type in ("amount_mismatch", "quantity_mismatch"):
+            req |= {"get_po_approvals", "calculate_difference"}
+    return req
+
+
+def _fmt(n) -> str:
+    return f"{n:,.2f}" if isinstance(n, (int, float)) else str(n)
+
+
+def build_facts(retrieved: dict) -> list[str]:
+    """Verified facts: derived ONLY from retrieved records and deterministic calculations, never from model text."""
+    facts: list[str] = []
+    inv = retrieved.get("get_invoice") or {}
+    invoices = inv.get("invoices", []) if inv.get("found") else []
+    for r in invoices:
+        facts.append(f"Invoice {r['invoice_number']} ({r['invoice_id']}): vendor '{r['vendor_name']}' ({r['vendor_id']}), "
+                     f"PO {r['po_number']}, dated {r['invoice_date']}, quantity {_fmt(r['quantity'])}, amount {_fmt(r['amount'])}.")
+    if not invoices:
+        facts.append("No invoice record was retrieved.")
+    po = retrieved.get("get_po")
+    if po is not None:
+        if po.get("found"):
+            facts.append(f"Purchase order {po['po_number']}: vendor '{po['vendor_name']}' ({po['vendor_id']}), "
+                         f"dated {po['po_date']}, quantity {_fmt(po['quantity'])}, amount {_fmt(po['amount'])}.")
+        else:
+            facts.append(f"No purchase order {po['po_number']} is on file.")
+    grn = retrieved.get("get_goods_receipt")
+    if grn is not None:
+        if grn.get("found"):
+            for g in grn["receipts"]:
+                note = f" Receiving note (text, not an approval): '{g['notes']}'." if g.get("notes") else ""
+                facts.append(f"Goods receipt {g['grn_number']} on {g['receipt_date']}: {_fmt(g['quantity_received'])} units received.{note}")
+            if len(grn["receipts"]) > 1:
+                facts.append(f"Total received across {len(grn['receipts'])} receipts: {_fmt(grn['total_quantity_received'])} units.")
+        else:
+            facts.append(f"No goods receipt is on file for PO {grn['po_number']}.")
+    # deterministic comparisons computed by the backend
+    if invoices and po and po.get("found"):
+        d = da.calculate_difference(invoices[-1]["amount"], po["amount"])
+        if d["difference"]:
+            word = "above" if d["difference"] > 0 else "below"
+            facts.append(f"Invoice amount is {_fmt(abs(d['difference']))} ({d['percent_of_b']}%) {word} the PO amount; "
+                         f"amount tolerance is {da.POLICIES['amount']['tolerance_pct']}%.")
+    if invoices and grn and grn.get("found"):
+        d = da.calculate_difference(invoices[-1]["quantity"], grn["total_quantity_received"])
+        if d["difference"]:
+            word = "more" if d["difference"] > 0 else "fewer"
+            facts.append(f"Invoice bills {_fmt(abs(d['difference']))} {word} units than were received "
+                         f"(quantity tolerance is {da.POLICIES['quantity']['tolerance_units']} units).")
+    ap = retrieved.get("get_po_approvals")
+    if ap is not None:
+        if ap.get("found"):
+            for a in ap["amendments"]:
+                facts.append(f"PO amendment {a['amendment_id']} approved by {a['approved_by']} on {a['approved_on']}.")
+        else:
+            facts.append(f"No approved amendment is on file for PO {ap['po_number']}.")
+    return facts
 
 
 _NUM = re.compile(r"\d[\d,]*\.?\d*")
@@ -150,7 +225,7 @@ def _unverified_numbers(facts: list[str], tool_results: list[dict]) -> list[str]
 
 
 def _apply_guardrails(f: Finding, anomaly_type: str, evidence_missing: bool,
-                      contradictory: bool = False) -> tuple[Finding, list[str]]:
+                      multiple_discrepancies: bool = False) -> tuple[Finding, list[str]]:
     notes = []
     if f.recommendation not in ("approve", "request_vendor_clarification", "escalate", "reject"):
         f.recommendation = "escalate"; notes.append("invalid recommendation -> escalate")
@@ -160,16 +235,19 @@ def _apply_guardrails(f: Finding, anomaly_type: str, evidence_missing: bool,
         if f.recommendation != "escalate" or f.confidence != "low":
             notes.append("missing evidence: forced escalate/low")
         f.recommendation, f.confidence = "escalate", "low"
-    if contradictory and (f.recommendation != "escalate" or f.confidence != "low"):
+    if multiple_discrepancies and (f.recommendation != "escalate" or f.confidence != "low"):
         f.recommendation, f.confidence = "escalate", "low"
-        notes.append("contradictory evidence (amount and quantity both mismatch): forced escalate/low")
+        notes.append("multiple independent discrepancies (amount and quantity both off): forced escalate/low")
     if anomaly_type == "vendor_name_mismatch" and f.recommendation in ("reject", "approve"):
         f.recommendation = "request_vendor_clarification"
         notes.append("vendor mismatch: never auto-resolved -> request_vendor_clarification")
     return f, notes
 
 
-def investigate(conn, case_id: str, order: tuple[str, ...] = ("vultr", "openrouter")) -> cases.Case:
+def investigate(conn, case_id: str, order: tuple[str, ...] = ("vultr", "openrouter"),
+                guardrails: bool = True) -> cases.Case:
+    """`guardrails=False` disables the enforced contract and the rule-based overrides. It exists only so the
+    evaluation can measure what the guardrails add; the API never passes it."""
     case = cases.get_case(conn, case_id)
     if case.status == "received":
         cases.transition(conn, case_id, "investigating", "agent", "Agent investigation started")
@@ -183,11 +261,19 @@ def investigate(conn, case_id: str, order: tuple[str, ...] = ("vultr", "openrout
                     f"Rule findings: {'; '.join(rule_notes) or 'none recorded'}\n"
                     "Investigate and submit your finding."}]
     retrieved: dict[str, dict] = {}
+    called: set[str] = set()
+    rejected: list[list[str]] = []
     results: list[dict] = []
     finding, provider, model, nudged = None, "none", None, False
+    t0 = time.perf_counter()
+    usage = {"llm_calls": 0, "prompt_tokens": 0, "completion_tokens": 0}
 
     for _ in range(MAX_STEPS):
         msg, provider, model = llm.chat(messages, TOOLS, order)
+        u = llm.last_usage()
+        usage["llm_calls"] += 1
+        usage["prompt_tokens"] += u.get("prompt_tokens", 0)
+        usage["completion_tokens"] += u.get("completion_tokens", 0)
         calls = msg.tool_calls or []
         if not calls:
             if nudged:
@@ -205,14 +291,22 @@ def investigate(conn, case_id: str, order: tuple[str, ...] = ("vultr", "openrout
             except json.JSONDecodeError:
                 args = {}
             if c.function.name == "submit_finding":
-                try:
-                    finding = Finding(**args)
-                    out = {"accepted": True}
-                except (ValidationError, TypeError) as exc:
-                    out = {"error": f"invalid finding: {exc}"}
+                missing = sorted(_required_steps(case.anomaly_type, retrieved) - called) if guardrails else []
+                if missing:
+                    rejected.append(missing)
+                    out = {"error": "finding NOT accepted: required steps not done yet. Call these tools first: "
+                                    + ", ".join(missing)}
+                else:
+                    try:
+                        finding = Finding(**args)
+                        out = {"accepted": True}
+                    except (ValidationError, TypeError) as exc:
+                        out = {"error": f"invalid finding: {exc}"}
             else:
                 out = _run_tool(conn, c.function.name, args)
-                retrieved[c.function.name] = out
+                if "error" not in out:
+                    called.add(c.function.name)
+                    retrieved[c.function.name] = out
                 results.append(out)
                 with conn:
                     cases.add_event(conn, case_id, "agent", "tool_call",
@@ -227,7 +321,9 @@ def investigate(conn, case_id: str, order: tuple[str, ...] = ("vultr", "openrout
         cases.transition(
             conn, case_id, "awaiting_review", "agent",
             "Investigation incomplete; escalated for manual review",
-            {"reason": "agent produced no valid finding", "provider": provider, "model": model},
+            {"reason": "agent produced no valid finding", "provider": provider, "model": model,
+             "rejected_submissions_missing_steps": rejected,
+             "metrics": {**usage, "elapsed_s": round(time.perf_counter() - t0, 2)}},
             fields={"recommendation": "escalate", "confidence": "low", "investigation_provider": provider,
                     "investigation_model": model,
                     "finding": "Automated investigation did not produce a valid finding; manual review required.",
@@ -245,21 +341,28 @@ def investigate(conn, case_id: str, order: tuple[str, ...] = ("vultr", "openrout
     evidence_missing = any(r and not r.get("found", True) for k, r in retrieved.items()
                            if k in ("get_po", "get_goods_receipt", "get_invoice"))
     rule_types = {(e.detail or {}).get("rule") for e in cases.get_timeline(conn, case_id) if e.type == "rule_check"}
-    contradictory = {"amount_mismatch", "quantity_mismatch"} <= rule_types
-    finding, notes = _apply_guardrails(finding, case.anomaly_type, evidence_missing, contradictory)
-    bad_numbers = _unverified_numbers(finding.verified_facts, results)
+    multiple_discrepancies = {"amount_mismatch", "quantity_mismatch"} <= rule_types
+    if guardrails:
+        finding, notes = _apply_guardrails(finding, case.anomaly_type, evidence_missing, multiple_discrepancies)
+    else:
+        notes = []
+    bad_numbers = _unverified_numbers(
+        finding.verified_facts + [finding.interpretation, finding.recommendation_rationale], results)
+    facts = build_facts(retrieved)
 
-    text = ("Verified facts:\n" + "\n".join(f"- {x}" for x in finding.verified_facts)
+    text = ("Verified facts:\n" + "\n".join(f"- {x}" for x in facts)
             + f"\n\nInterpretation: {finding.interpretation}")
     cases.transition(
         conn, case_id, "awaiting_review", "agent",
         f"Agent recommends '{finding.recommendation}' ({finding.confidence} confidence); awaiting human review",
         {"recommendation": finding.recommendation, "confidence": finding.confidence, "provider": provider,
          "model": model, "dropped_evidence_refs": dropped, "guardrail_adjustments": notes,
-         "unverified_numbers": bad_numbers},
+         "unverified_numbers": bad_numbers, "model_scratch_observations": finding.verified_facts,
+         "rejected_submissions_missing_steps": rejected,
+         "metrics": {**usage, "elapsed_s": round(time.perf_counter() - t0, 2)}},
         fields={"recommendation": finding.recommendation, "confidence": finding.confidence,
                 "recommendation_rationale": finding.recommendation_rationale, "finding": text,
-                "finding_facts": json.dumps(finding.verified_facts), "finding_interpretation": finding.interpretation,
+                "finding_facts": json.dumps(facts), "finding_interpretation": finding.interpretation,
                 "suggested_action": finding.suggested_action, "evidence": json.dumps(evidence),
                 "investigation_provider": provider, "investigation_model": model,
                 "requires_human_approval": 1})

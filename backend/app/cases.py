@@ -75,8 +75,12 @@ def transition(conn, case_id: str, new_status: str, actor: str, summary: str, de
         raise
 
 
-def decide(conn, case_id: str, decision: str, actor: str, reason: str) -> Case:
-    """Human decision: approve or dismiss a case that is awaiting review."""
+def decide(conn, case_id: str, decision: str, actor: str, reason: str, declared_reviewer: str | None = None) -> Case:
+    """Human decision: approve or dismiss a case that is awaiting review.
+
+    `actor` is the AUTHENTICATED identity (set by the server, never the client). `declared_reviewer` is
+    the name the reviewer typed; it is recorded but labelled self-declared because it is not verified.
+    """
     if decision not in ("approved", "dismissed"):
         raise TransitionError("decision must be 'approved' or 'dismissed'")
     if not actor.strip() or not reason.strip():
@@ -89,11 +93,14 @@ def decide(conn, case_id: str, decision: str, actor: str, reason: str) -> Case:
             raise NotFoundError(case_id)
         if decision not in TRANSITIONS[row["status"]]:
             raise TransitionError(f"Case is '{row['status']}'; only cases awaiting review can be decided")
+        declared = (declared_reviewer or "").strip()
+        who = f"{actor.strip()} (declared reviewer: {declared})" if declared else actor.strip()
         conn.execute("UPDATE cases SET status=?, resolved_at=?, resolved_by=?, resolution_reason=? WHERE case_id=?",
-                     (decision, ts, actor.strip(), reason.strip(), case_id))
+                     (decision, ts, who, reason.strip(), case_id))
         add_event(conn, case_id, "human", "decision",
-                  f"{'Approved' if decision == 'approved' else 'Dismissed'} by {actor.strip()}",
-                  {"decision": decision, "actor": actor.strip(), "reason": reason.strip()}, ts=ts)
+                  f"{'Approved' if decision == 'approved' else 'Dismissed'} by {who}",
+                  {"decision": decision, "authenticated_user": actor.strip(),
+                   "declared_reviewer": declared or None, "reason": reason.strip()}, ts=ts)
         conn.commit()
     except Exception:
         conn.rollback()

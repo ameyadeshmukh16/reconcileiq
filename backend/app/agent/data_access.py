@@ -37,6 +37,15 @@ def get_goods_receipt(conn, po_number: str) -> dict:
     return {"found": True, "receipts": rows, "total_quantity_received": sum(r["quantity_received"] for r in rows)}
 
 
+def get_po_approvals(conn, po_number: str) -> dict:
+    """Approved amendments to a PO. Authoritative source for commercial authorization: a goods-receipt
+    note may EXPLAIN a price or quantity, but it is not an approval."""
+    rows = [dict(r) for r in conn.execute(
+        "SELECT amendment_id, po_number, approved_by, approved_on, new_quantity, new_amount, note "
+        "FROM po_amendments WHERE po_number=? ORDER BY approved_on", (po_number,))]
+    return {"found": True, "amendments": rows} if rows else {"found": False, "po_number": po_number}
+
+
 POLICIES = {
     "amount": {"policy": "Invoice vs PO amount", "tolerance_pct": config.AMOUNT_TOLERANCE_PCT,
                "rule": f"Invoices within {config.AMOUNT_TOLERANCE_PCT}% of the PO amount are acceptable."},
@@ -48,6 +57,9 @@ POLICIES = {
                "rule": "Invoice vendor must match the PO vendor. A near-match is a data-quality question, "
                        "never proof of fraud; request clarification rather than conclude."},
     "duplicate": {"policy": "Duplicate invoices", "rule": "A vendor may not submit the same invoice number twice."},
+    "authorization": {"policy": "Commercial authorization",
+                      "rule": "A price or quantity above the PO needs an approved PO amendment. A goods-receipt note or "
+                              "vendor statement can explain a difference but never authorizes it."},
     "evidence": {"policy": "Missing evidence", "rule": "Without a PO or goods receipt the match cannot be "
                                                       "completed; escalate, never guess or presume fraud."},
 }

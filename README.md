@@ -21,7 +21,7 @@ Accounts-payable teams match every vendor invoice against a purchase order (PO) 
 
 - Evidence values are filled in from the records the agent actually retrieved. The model only names which fields matter, so it cannot invent numbers. Any number in its prose that is not in the retrieved data is logged as `unverified_numbers`.
 - `requires_human_approval` is always true, and every investigated case ends in `awaiting_review`.
-- Missing or contradictory evidence forces `escalate` with `low` confidence.
+- Missing evidence, or several independent discrepancies on one invoice (for example amount and quantity both off), forces `escalate` with `low` confidence.
 - A vendor-name mismatch can never be auto-rejected or approved; it becomes a clarification request.
 - If the agent produces no valid finding, the case is escalated rather than guessed.
 - Status transitions are validated, and the case update and its audit event commit in one transaction.
@@ -62,7 +62,26 @@ Runs are idempotent: one case per invoice, so re-running never duplicates work.
 
 ## Demo data
 
-All data is synthetic and generated deterministically (`python -m app.seed`): 42 invoices, with 9 seeded anomalies (amount, quantity, vendor-name, stale-date and missing-receipt cases, plus a contradictory-evidence case), one exact duplicate and 30 clean invoices. A within-tolerance invoice checks that the rules do not over-flag.
+All data is synthetic and generated deterministically (`python -m app.seed`): 42 invoices, of which 10 are flagged (an exact duplicate, a stale invoice and 8 seeded anomalies covering amount, quantity, vendor-name, date and missing-receipt cases, including one where a receiving note explains an overcharge without authorizing it) and 32 are not (including one within-tolerance invoice that checks the rules do not over-flag, and the original of the duplicate).
+
+## Evaluation (measured, with caveats)
+
+`python -m app.evaluation.run` runs 17 flagged cases (+2 that must stay clean) through three modes: rules only, rules + agent with the guardrails switched off, and rules + agent + guardrails. Full tables: [docs/eval-results.md](docs/eval-results.md). Run on Vultr Serverless Inference (`deepseek-v4.1-flash-1017`), temperature 0, one run per mode.
+
+| Mode (17 flagged cases) | Acceptable | Unsafe | Key finding stated* | Median latency | Median tokens |
+|---|---:|---:|---:|---:|---:|
+| Rules only | 17/17 | 0 | 2/6 | - | - |
+| Agent, no guardrails | 16/17 | 0 | 6/6 | 8.6 s | ~8.0k |
+| Agent + guardrails | 17/17 | 0 | 6/6 | 11.2 s | ~8.2k |
+
+*Of 6 cases labelled with a key point a reviewer needs (for example "no approved amendment is on file"), how many outputs state it.
+
+What this does and does not show:
+- **Safety is not the differentiator here.** No mode approved an unauthorized case, including the prompt-injection case (a receiving note telling the reviewer to approve). Rules-only reaches 17/17 only because it escalates everything, which is safe but gives the reviewer nothing. The labels accept several defensible answers, so "acceptable" cannot separate the modes well.
+- **The agent's value is in what it tells the reviewer** (the missing authorization, the partial-receipt totals, the specific follow-up action), not in a better accept/reject choice. The key-point count is partly satisfied by the backend-built facts, which both agent modes use, so it overstates the model's own contribution.
+- **The guardrails never had to override the model on this model.** In the guarded run, zero overrides and zero rejected submissions fired. The one difference (INV-72901: `reject` unguarded, `escalate` guarded) is a single run at temperature 0 and may be run-to-run variance, not proof. Earlier manual testing showed the weaker free OpenRouter fallback model was less cautious on contradictory evidence, which is why the guardrails exist; a run on that model could not be completed because its free-tier daily rate limit was exhausted.
+- **Small and partly in-sample.** The 10 dev cases are what the prompts were built against; only the 7 holdout cases were labelled before any model ran. Labels are the author's judgement. n is too small for statistical claims.
+- **Cost:** token counts are measured; no dollar figure is given because the per-token price is not recorded here.
 
 ## Run locally
 
@@ -72,7 +91,7 @@ docker compose up --build
 curl http://localhost:8000/api/health
 ```
 
-Tests: `cd backend && pip install -r requirements.txt && pytest` (30 tests; the agent tests use a scripted fake LLM, so no network or keys are needed).
+Tests: `cd backend && pip install -r requirements.txt && pytest` (35 tests; the agent tests use a scripted fake LLM, so no network or keys are needed).
 
 ## Deploy to a Vultr VM
 

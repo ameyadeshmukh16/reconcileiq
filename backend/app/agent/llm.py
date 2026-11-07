@@ -4,6 +4,7 @@ Transient (fallback allowed): timeouts, connection errors, HTTP 408/429/5xx.
 Everything else (bad key, bad model, malformed request, missing config) raises immediately so a
 build-time bug surfaces loudly instead of being masked by a silent fallback.
 """
+import threading
 from dataclasses import dataclass
 
 from openai import APIConnectionError, APIStatusError, APITimeoutError, OpenAI, RateLimitError
@@ -11,6 +12,13 @@ from openai import APIConnectionError, APIStatusError, APITimeoutError, OpenAI, 
 from .. import config
 
 TIMEOUT_S = 60.0
+
+_last = threading.local()
+
+
+def last_usage() -> dict:
+    """Token usage reported by the provider for the most recent chat() call on this thread."""
+    return getattr(_last, "usage", None) or {}
 
 
 class ConfigError(RuntimeError):
@@ -67,6 +75,9 @@ def chat(messages: list[dict], tools: list[dict], order: tuple[str, ...] = ("vul
         try:
             resp = p.client().chat.completions.create(
                 model=p.model, messages=messages, tools=tools, tool_choice="auto", temperature=0)
+            u = getattr(resp, "usage", None)
+            _last.usage = {"prompt_tokens": getattr(u, "prompt_tokens", 0) or 0,
+                           "completion_tokens": getattr(u, "completion_tokens", 0) or 0}
             return resp.choices[0].message, p.name, p.model
         except Exception as exc:           # noqa: BLE001
             if not is_transient(exc):
